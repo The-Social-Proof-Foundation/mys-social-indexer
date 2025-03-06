@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: mys-social-indexer-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: mys_social_indexer
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  indexer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mys-social-indexer
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/mys_social_indexer
+      - CHECKPOINT_URL=https://checkpoints.mainnet.mysocial.io
+      - INITIAL_CHECKPOINT=0
+      - CONCURRENCY=5
+      - RUST_LOG=info,mys_social_indexer=debug
+      - API_HOST=0.0.0.0
+      - API_PORT=3000
+      - METRICS_PORT=9000
+    ports:
+      - "3000:3000"
+      - "9000:9000"
+    volumes:
+      - indexer_data:/app/data
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: mys-social-indexer-grafana
+    restart: always
+    depends_on:
+      - postgres
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  postgres_data:
+  indexer_data:
+  grafana_data:

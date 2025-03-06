@@ -1,0 +1,60 @@
+[package]
+name = "mys-social-indexer"
+version = "0.1.0"
+edition = "2021"
+authors = ["MySocial Team"]
+description = "Social network indexer for MySocial blockchain"
+license = "Apache-2.0"
+
+[dependencies]
+# Core MySocial dependencies
+mys-types = { path = "../../crates/mys-types" }
+mys-data-ingestion-core = { path = "../../crates/mys-data-ingestion-core" }
+
+# Async runtime and traits
+tokio = { version = "1.38.0", features = ["full"] }
+async-trait = "0.1.83"
+
+# Database
+diesel = { version = "2.1.4", features = ["postgres", "r2d2", "chrono", "serde_json", "numeric"] }
+diesel-async = { version = "0.4.1", features = ["postgres", "deadpool"] }
+diesel-migrations = "2.1.0"
+
+# Serialization and deserialization
+serde = { version = "1.0.193", features = ["derive"] }
+serde_json = "1.0.108"
+
+# Error handling
+anyhow = "1.0.86"
+thiserror = "1.0.52"
+
+# Logging and metrics
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json"] }
+prometheus = "0.13.3"
+
+# Utilities
+chrono = { version = "0.4.31", features = ["serde"] }
+bigdecimal = { version = "0.4.2", features = ["serde"] }
+once_cell = "1.19.0"
+futures = "0.3.30"
+dotenv = "0.15.0"
+
+# Web server for API
+axum = "0.7.3"
+tower = "0.4.13"
+tower-http = { version = "0.5.0", features = ["trace", "cors"] }
+hyper = { version = "1.1.0", features = ["full"] }
+
+[dev-dependencies]
+tokio-test = "0.4.3"
+test-log = { version = "0.2.14", features = ["trace"] }
+tracing-test = "0.2.4"
+
+[[bin]]
+name = "mys-social-indexer"
+path = "src/main.rs"
+
+[lib]
+name = "mys_social_indexer"
+path = "src/lib.rs"
