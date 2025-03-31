@@ -1,32 +1,29 @@
-# MySocial Network Indexer
+# MySocial Social Indexer
 
-A comprehensive indexer for the MySocial blockchain that tracks all social network activities including profiles, platforms, content, interactions, IP registrations, and fee distributions.
+A simplified indexer for the MySocial blockchain that focuses on tracking user profiles and their updates.
 
 ## Features
 
-- **Full Social Graph Indexing**: Tracks profiles, follows, blocks, and relationships
-- **Platform Analytics**: Monitors platform growth, user engagement, and content trends
-- **Content Metrics**: Records content creation, interactions, and popularity
-- **IP Registration Tracking**: Indexes intellectual property registrations and licenses
-- **Fee Distribution Analysis**: Monitors fee models, distributions, and recipient payments
-- **Real-time Statistics**: Aggregates daily metrics for quick analysis
-- **GraphQL & REST API**: Provides comprehensive API for accessing indexed data
+- **Profile Indexing**: Tracks profile creation and updates
+- **Database Storage**: Stores profile data in PostgreSQL
+- **REST API**: Provides endpoints for accessing profile data
+- **Configurable**: Customizable via environment variables
+- **Containerized**: Easy deployment with Docker
 
 ## Architecture
 
 The indexer consists of the following components:
 
 1. **Blockchain Listener**: Processes MySocial blockchain checkpoints and extracts events
-2. **Event Processor**: Parses and processes social network-related events
-3. **Database**: Stores indexed data in a PostgreSQL database
-4. **API Server**: Exposes data through REST endpoints
-5. **Metrics & Monitoring**: Tracks indexer performance and health
+2. **Event Processor**: Identifies and processes profile-related events
+3. **Database**: Stores profile data in PostgreSQL
+4. **API Server**: Exposes profile data through REST endpoints
 
 ## Getting Started
 
 ### Prerequisites
 
-- Rust 1.70+
+- Rust 1.75+
 - PostgreSQL 15+
 - Docker and Docker Compose (for containerized deployment)
 
@@ -54,8 +51,7 @@ docker-compose up -d
 
 This will start:
 - PostgreSQL database
-- Social Network Indexer
-- Grafana dashboard for monitoring
+- Social Profile Indexer
 
 ## Configuration
 
@@ -63,71 +59,60 @@ The indexer can be configured via environment variables:
 
 ```bash
 # Database configuration
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/mys_social_indexer
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/myso_social_indexer
 DATABASE_MAX_CONNECTIONS=10
-DATABASE_CONNECTION_TIMEOUT=30
+
+# Server configuration
+SERVER_HOST=0.0.0.0
+SERVER_PORT=8080
 
 # Indexer configuration
-CHECKPOINT_URL=https://checkpoints.mainnet.mysocial.io
-INITIAL_CHECKPOINT=0
-CONCURRENCY=5
-PROGRESS_FILE_PATH=/tmp/social_indexer_progress
-MONITORING_INTERVAL=30
+CHECKPOINT_URL=https://checkpoints.testnet.mysocial.network
+START_CHECKPOINT=0
+INDEXER_CONCURRENCY=5
 
-# API configuration
-API_HOST=0.0.0.0
-API_PORT=3000
-ENABLE_CORS=true
+# Package configuration
+PROFILE_PACKAGE_ADDRESS=0x61e95f6a3382232579263b473847d00ac1d56dbe69e22674de7d35b4ce26e588
 
-# Metrics configuration
-METRICS_ENABLED=true
-METRICS_PORT=9000
+# Logging
+RUST_LOG=info,mys_social_indexer=debug
 ```
 
 ## API Endpoints
 
 ### Profiles
 
-- `GET /api/profiles` - List profiles
-- `GET /api/profiles/:id` - Get profile details
-- `GET /api/profiles/:id/following` - Get profiles followed by user
-- `GET /api/profiles/:id/followers` - Get followers of user
-- `GET /api/profiles/:id/content` - Get content created by user
-- `GET /api/profiles/:id/platforms` - Get platforms joined by user
+- `GET /profiles` - List profiles with pagination (query params: limit, offset)
+- `GET /profiles/:address` - Get profile by owner address
+- `GET /profiles/username/:username` - Get profile by username
 
-### Platforms
+### Health
 
-- `GET /api/platforms` - List platforms
-- `GET /api/platforms/:id` - Get platform details
-- `GET /api/platforms/:id/users` - Get platform users
-- `GET /api/platforms/:id/content` - Get platform content
-- `GET /api/platforms/:id/stats` - Get platform statistics
+- `GET /health` - Check the health of the API server
 
-### Content
+## Database Schema
 
-- `GET /api/content` - List content
-- `GET /api/content/:id` - Get content details
-- `GET /api/content/:id/interactions` - Get content interactions
-- `GET /api/content/trending` - Get trending content
+```sql
+-- Profiles Table
+CREATE TABLE profiles (
+    id SERIAL PRIMARY KEY,
+    owner_address VARCHAR(255) NOT NULL,
+    username VARCHAR(100) NOT NULL,
+    display_name VARCHAR(255),
+    bio TEXT,
+    avatar_url VARCHAR(255),
+    website_url VARCHAR(255),
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
 
-### Intellectual Property
-
-- `GET /api/ip` - List IP assets
-- `GET /api/ip/:id` - Get IP details
-- `GET /api/ip/:id/licenses` - Get IP licenses
-
-### Fee Distribution
-
-- `GET /api/fees/models` - List fee models
-- `GET /api/fees/models/:id` - Get fee model details
-- `GET /api/fees/recipients` - List fee recipients
-- `GET /api/fees/distributions` - List fee distributions
-
-### Statistics
-
-- `GET /api/stats/daily` - Get daily statistics
-- `GET /api/stats/platforms` - Get platform statistics
-- `GET /api/stats/overview` - Get overall statistics
+-- Indexer State Table
+CREATE TABLE indexer_checkpoint_state (
+    id SERIAL PRIMARY KEY,
+    last_processed_checkpoint BIGINT NOT NULL,
+    last_processed_timestamp TIMESTAMP NOT NULL DEFAULT NOW()
+);
+```
 
 ## License
 

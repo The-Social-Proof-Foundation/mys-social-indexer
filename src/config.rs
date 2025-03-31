@@ -1,153 +1,73 @@
-use anyhow::Result;
-use once_cell::sync::OnceCell;
+// Copyright (c) MySocial Team
+// SPDX-License-Identifier: Apache-2.0
+
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::path::PathBuf;
-use tracing::info;
 
-/// Global configuration instance
-static CONFIG: OnceCell<Config> = OnceCell::new();
-
-/// Configuration for the MySocial indexer
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Database configuration
     pub database: DatabaseConfig,
-    
-    /// Indexer configuration
-    pub indexer: IndexerConfig,
-    
-    /// API server configuration
-    pub api: ApiConfig,
-    
-    /// Metrics configuration
-    pub metrics: MetricsConfig,
+    pub server: ServerConfig,
+    pub blockchain: BlockchainConfig,
 }
 
-/// Database configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
-    /// Database connection URL
     pub url: String,
-    
-    /// Maximum number of connections in the pool
     pub max_connections: u32,
-    
-    /// Connection timeout in seconds
-    pub connection_timeout: u64,
 }
 
-/// Indexer configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IndexerConfig {
-    /// URL to fetch checkpoints from
-    pub checkpoint_url: String,
-    
-    /// Initial checkpoint to start processing from
-    pub initial_checkpoint: Option<u64>,
-    
-    /// Number of concurrent workers for processing
-    pub concurrency: usize,
-    
-    /// Path to save local progress
-    pub progress_file_path: PathBuf,
-    
-    /// Monitoring interval in seconds
-    pub monitoring_interval: u64,
-}
-
-/// API server configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApiConfig {
-    /// Host to bind API server to
+pub struct ServerConfig {
     pub host: String,
-    
-    /// Port to listen on
     pub port: u16,
-    
-    /// Enable CORS
-    pub enable_cors: bool,
 }
 
-/// Metrics configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetricsConfig {
-    /// Enable metrics collection
-    pub enabled: bool,
-    
-    /// Metrics endpoint port
-    pub port: u16,
+pub struct BlockchainConfig {
+    pub rpc_url: String,
+    pub ws_url: String,
+    pub poll_interval_ms: u64,
+    pub batch_size: usize,
 }
 
 impl Config {
-    /// Initialize configuration from environment variables
-    pub fn init() -> Result<&'static Self> {
-        let config = Config {
+    pub fn from_env() -> Self {
+        // Load .env file if present
+        let _ = dotenv::dotenv();
+
+        Config {
             database: DatabaseConfig {
-                url: env::var("DATABASE_URL").unwrap_or_else(|_| {
-                    "postgres://postgres:postgres@localhost:5432/mys_social_indexer".to_string()
-                }),
+                // Provide a default localhost PostgreSQL URL
+                url: env::var("DATABASE_URL").unwrap_or_else(|_| 
+                    "postgres://postgres:postgres@localhost:5432/myso_social_indexer".to_string()
+                ),
                 max_connections: env::var("DATABASE_MAX_CONNECTIONS")
                     .unwrap_or_else(|_| "10".to_string())
                     .parse()
-                    .unwrap_or(10),
-                connection_timeout: env::var("DATABASE_CONNECTION_TIMEOUT")
-                    .unwrap_or_else(|_| "30".to_string())
-                    .parse()
-                    .unwrap_or(30),
+                    .expect("DATABASE_MAX_CONNECTIONS must be a number"),
             },
-            indexer: IndexerConfig {
-                checkpoint_url: env::var("CHECKPOINT_URL")
-                    .unwrap_or_else(|_| "https://checkpoints.mainnet.mysocial.io".to_string()),
-                initial_checkpoint: env::var("INITIAL_CHECKPOINT")
-                    .ok()
-                    .and_then(|s| s.parse().ok()),
-                concurrency: env::var("CONCURRENCY")
-                    .unwrap_or_else(|_| "5".to_string())
+            server: ServerConfig {
+                host: env::var("SERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
+                port: env::var("SERVER_PORT")
+                    .unwrap_or_else(|_| "8080".to_string())
                     .parse()
-                    .unwrap_or(5),
-                progress_file_path: PathBuf::from(
-                    env::var("PROGRESS_FILE_PATH").unwrap_or_else(|_| "/tmp/social_indexer_progress".to_string()),
-                ),
-                monitoring_interval: env::var("MONITORING_INTERVAL")
-                    .unwrap_or_else(|_| "30".to_string())
-                    .parse()
-                    .unwrap_or(30),
+                    .expect("SERVER_PORT must be a number"),
             },
-            api: ApiConfig {
-                host: env::var("API_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
-                port: env::var("API_PORT")
-                    .unwrap_or_else(|_| "3000".to_string())
+            blockchain: BlockchainConfig {
+                rpc_url: env::var("RPC_URL")
+                    .unwrap_or_else(|_| "http://localhost:9000".to_string()),
+                ws_url: env::var("WS_URL")
+                    .unwrap_or_else(|_| "ws://localhost:9000".to_string()),
+                poll_interval_ms: env::var("POLL_INTERVAL_MS")
+                    .unwrap_or_else(|_| "5000".to_string()) // 5 seconds by default
                     .parse()
-                    .unwrap_or(3000),
-                enable_cors: env::var("ENABLE_CORS")
-                    .unwrap_or_else(|_| "true".to_string())
+                    .expect("POLL_INTERVAL_MS must be a number"),
+                batch_size: env::var("EVENT_BATCH_SIZE")
+                    .unwrap_or_else(|_| "50".to_string()) // 50 events per batch by default
                     .parse()
-                    .unwrap_or(true),
+                    .expect("EVENT_BATCH_SIZE must be a number"),
             },
-            metrics: MetricsConfig {
-                enabled: env::var("METRICS_ENABLED")
-                    .unwrap_or_else(|_| "true".to_string())
-                    .parse()
-                    .unwrap_or(true),
-                port: env::var("METRICS_PORT")
-                    .unwrap_or_else(|_| "9000".to_string())
-                    .parse()
-                    .unwrap_or(9000),
-            },
-        };
-
-        // Log loaded configuration
-        info!("Loaded configuration: {:?}", config);
-
-        // Store config in the global instance
-        CONFIG.set(config).expect("Failed to set global config");
-        
-        Ok(CONFIG.get().expect("Config not initialized"))
-    }
-
-    /// Get the global configuration instance
-    pub fn get() -> &'static Self {
-        CONFIG.get().expect("Config not initialized")
+        }
     }
 }

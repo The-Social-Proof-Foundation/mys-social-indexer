@@ -1,92 +1,105 @@
-use anyhow::Result;
-use dotenv::dotenv;
-use mys_data_ingestion_core::{setup_single_workflow, FileProgressStore, WorkerPool};
-use std::sync::Arc;
-use tokio::sync::oneshot;
-use tokio::signal;
-use tracing::{info, error, warn};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+// Copyright (c) MySocial Team
+// SPDX-License-Identifier: Apache-2.0
 
-use mys_social_indexer::config::Config;
-use mys_social_indexer::db::init_database;
-use mys_social_indexer::api;
-use mys_social_indexer::worker::SocialIndexerWorker;
+use anyhow::Result;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tracing::{error, info};
+
+use mys_social_indexer::{
+    api,
+    blockchain::{BlockchainEventListener, ProfileEventListener},
+    config::Config,
+    db,
+    set_profile_package_address,
+    get_profile_package_address,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load environment variables from .env file if present
-    dotenv().ok();
-    
-    // Initialize tracing
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info,mys_social_indexer=debug".into()),
-        ))
-        .with(tracing_subscriber::fmt::layer())
+    // Initialize tracing subscriber for logging
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     
-    // Load configuration
-    let config = Config::init()?;
-    info!("Initialized configuration");
+    info!("Starting MySocial indexer...");
     
-    // Initialize database
-    let db = Arc::new(init_database().await?);
-    info!("Connected to database");
+    // Load config from environment
+    let config = Config::from_env();
     
-    // Prepare termination signals
-    let (term_sender, term_receiver) = oneshot::channel();
+    // Set profile package address from environment variable if provided
+    if let Ok(address) = std::env::var("PROFILE_PACKAGE_ADDRESS") {
+        set_profile_package_address(address.clone());
+        info!("Set profile package address to {}", address);
+    } else {
+        info!("Using default profile package address: {}", get_profile_package_address());
+    }
     
-    // Set up worker for blockchain processing
-    let checkpoint_url = config.indexer.checkpoint_url.clone();
-    let initial_checkpoint = config.indexer.initial_checkpoint.unwrap_or(0);
-    let worker_id = "social_indexer".to_string();
+    // Run database migrations
+    info!("Running database migrations...");
+    if let Err(e) = db::run_migrations(&config) {
+        error!("Failed to run migrations: {}", e);
+        return Err(e);
+    }
     
-    // Create the worker with database access
-    let worker = SocialIndexerWorker::new(db.clone(), worker_id.clone());
+    // Set up database connection pool
+    info!("Setting up database connection pool...");
+    let db_pool = db::setup_connection_pool(&config).await?;
     
-    // Create worker pool
-    let worker_pool = WorkerPool::new(worker, worker_id, config.indexer.concurrency);
+    // Create event channel for profile events
+    let (tx, rx) = mpsc::channel(100);
     
-    // Start the blockchain indexer
-    let executor_handle = tokio::spawn(async move {
-        match setup_single_workflow(
-            worker_pool,
-            checkpoint_url,
-            initial_checkpoint,
-            config.indexer.concurrency,
-            None,
-        ).await {
-            Ok((executor, _)) => {
-                match executor.await {
-                    Ok(_) => info!("Indexer finished successfully"),
-                    Err(e) => error!("Indexer failed: {}", e),
-                }
-            },
-            Err(e) => error!("Failed to set up indexer workflow: {}", e),
+    // Create the blockchain event listener
+    let blockchain_listener = Arc::new(BlockchainEventListener::new(config.clone(), db_pool.clone()));
+    
+    // Register profile event handler
+    blockchain_listener.register_event_handler(tx).await;
+    
+    // Create and start profile event listener
+    let mut profile_listener = ProfileEventListener::new(
+        db_pool.clone(),
+        rx,
+        "profile-worker".to_string(),
+    );
+    
+    let profile_handle = tokio::spawn(async move {
+        if let Err(e) = profile_listener.start().await {
+            error!("Profile event listener error: {}", e);
         }
     });
     
-    // Start API server
+    // Start the blockchain event listener
+    let blockchain_handle = tokio::spawn({
+        let listener = blockchain_listener.clone();
+        async move {
+            if let Err(e) = listener.start().await {
+                error!("Blockchain event listener error: {}", e);
+            }
+        }
+    });
+    
+    // Start the API server
     let api_handle = tokio::spawn(async move {
-        if let Err(e) = api::start_api_server(db).await {
+        if let Err(e) = api::setup_api_server(&config, db_pool).await {
             error!("API server error: {}", e);
         }
     });
     
-    // Handle shutdown signals
-    tokio::spawn(async move {
-        match signal::ctrl_c().await {
-            Ok(()) => {
-                info!("Shutdown signal received, initiating graceful shutdown");
-                let _ = term_sender.send(());
-            },
-            Err(e) => error!("Failed to listen for shutdown signal: {}", e),
+    // Wait for all tasks to complete (they should run indefinitely)
+    tokio::select! {
+        _ = profile_handle => {
+            error!("Profile event listener terminated unexpectedly");
         }
-    });
+        _ = blockchain_handle => {
+            error!("Blockchain event listener terminated unexpectedly");
+        }
+        _ = api_handle => {
+            error!("API server terminated unexpectedly");
+        }
+    }
     
-    // Wait for all tasks to complete
-    let _ = tokio::join!(executor_handle, api_handle);
+    info!("Indexer terminated");
     
-    info!("MySocial Indexer shutdown complete");
     Ok(())
 }

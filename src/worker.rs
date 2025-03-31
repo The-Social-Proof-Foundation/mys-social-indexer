@@ -563,7 +563,7 @@ impl Worker for SocialIndexerWorker {
         for transaction in &checkpoint.transactions {
             // Process each event in the transaction
             for event in &transaction.events {
-                let type_str = &event.type;
+                let type_str = &event.type_;
                 
                 // Process events by module
                 match type_str {

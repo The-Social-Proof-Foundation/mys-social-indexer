@@ -44,13 +44,18 @@ COPY --from=builder --chown=appuser:appuser /app/migrations /app/migrations
 # Switch to app user
 USER appuser
 
-# Set environment variables
+# Set default environment variables
 ENV RUST_LOG=info
-ENV DATABASE_URL=postgres://postgres:postgres@postgres:5432/mys_social_indexer
+ENV DATABASE_URL=postgres://postgres:postgres@postgres:5432/myso_social_indexer
+ENV DATABASE_MAX_CONNECTIONS=10
+ENV SERVER_HOST=0.0.0.0
+ENV SERVER_PORT=8080
+ENV CHECKPOINT_URL=https://checkpoints.testnet.mysocial.network
+ENV START_CHECKPOINT=0
+ENV INDEXER_CONCURRENCY=5
 
 # Expose API port
-EXPOSE 3000
-EXPOSE 9000
+EXPOSE 8080
 
 # Run the application
 CMD ["/app/mys-social-indexer"]

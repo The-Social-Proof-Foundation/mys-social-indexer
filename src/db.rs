@@ -1,82 +1,68 @@
-use crate::config::Config;
-use anyhow::Result;
-use diesel::PgConnection;
-use diesel_async::{
-    pooled_connection::{AsyncDieselConnectionManager, PoolError},
-    AsyncPgConnection, RunQueryDsl,
-};
+// Copyright (c) MySocial Team
+// SPDX-License-Identifier: Apache-2.0
+
+use std::sync::Arc;
+use anyhow::{anyhow, Result};
+use diesel::prelude::*;
+use diesel::pg::PgConnection;
+use diesel_async::AsyncPgConnection;
+use diesel_async::pooled_connection::deadpool::{Object, Pool};
+use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
-use std::time::Duration;
-use deadpool::Runtime;
-use tracing::{error, info};
 
-pub type DbPool = deadpool::managed::Pool<AsyncDieselConnectionManager<AsyncPgConnection>>;
-pub type DbConnection = deadpool::managed::Object<AsyncDieselConnectionManager<AsyncPgConnection>>;
+use crate::config::Config;
 
+pub type DbPool = Pool<AsyncPgConnection>;
+pub type DbConnection = Object<AsyncPgConnection>;
+
+// Define migrations
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
-/// Database manager for the indexer
+/// Database wrapper for connection pool access
+#[derive(Clone)]
 pub struct Database {
-    pool: DbPool,
+    pub pool: Arc<DbPool>,
 }
 
 impl Database {
-    /// Create a new database manager with connection pool
-    pub async fn new() -> Result<Self> {
-        let config = Config::get();
-        let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&config.database.url);
-        
-        // Configure pool with connection parameters
-        let pool = DbPool::builder(manager)
-            .max_size(config.database.max_connections)
-            .runtime(Runtime::Tokio1)
-            .build()?;
-            
-        // Create database instance
-        let db = Self { pool };
-        
-        // Test connection and run migrations
-        db.initialize().await?;
-        
-        Ok(db)
+    /// Create a new database instance
+    pub fn new(pool: DbPool) -> Self {
+        Self {
+            pool: Arc::new(pool),
+        }
     }
     
-    /// Initialize the database by testing connection and running migrations
-    async fn initialize(&self) -> Result<()> {
-        // Test connection by getting a connection from the pool
-        let _conn = self.get_connection().await?;
-        info!("Successfully connected to the database");
-        
-        // Run migrations
-        self.run_migrations()?;
-        
-        Ok(())
-    }
-    
-    /// Run database migrations
-    fn run_migrations(&self) -> Result<()> {
-        let config = Config::get();
-        let mut conn = PgConnection::establish(&config.database.url)?;
-        
-        // Apply migrations
-        conn.run_pending_migrations(MIGRATIONS)?;
-        info!("Database migrations applied successfully");
-        
-        Ok(())
-    }
-    
-    /// Get a database connection from the pool
-    pub async fn get_connection(&self) -> Result<DbConnection, PoolError> {
+    /// Get a connection from the pool
+    pub async fn get_connection(&self) -> Result<DbConnection> {
         self.pool.get().await
-    }
-    
-    /// Get the database connection pool reference
-    pub fn get_pool(&self) -> &DbPool {
-        &self.pool
+            .map_err(|e| anyhow!("Failed to get database connection: {}", e))
     }
 }
 
-/// Initialize database connection pool and run migrations
-pub async fn init_database() -> Result<Database> {
-    Database::new().await
+/// Sets up the database connection pool
+pub async fn setup_connection_pool(config: &Config) -> Result<Arc<Database>> {
+    let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&config.database.url);
+    
+    // Create the pool with basic configuration
+    let pool = Pool::builder(manager)
+        .max_size(config.database.max_connections as usize)
+        .build()?;
+    
+    // Test the connection
+    let _conn = pool.get().await?;
+    
+    // Create and return the database
+    Ok(Arc::new(Database::new(pool)))
+}
+
+/// Run database migrations
+pub fn run_migrations(config: &Config) -> Result<()> {
+    // Use a regular blocking connection for migrations
+    let mut conn = PgConnection::establish(&config.database.url)?;
+    
+    // Run migrations
+    conn.run_pending_migrations(MIGRATIONS)
+        .map_err(|e| anyhow::anyhow!("Migration error: {}", e))?;
+    
+    Ok(())
 }

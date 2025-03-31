@@ -1,75 +1,43 @@
-use chrono::{DateTime, Utc};
+// Copyright (c) MySocial Team
+// SPDX-License-Identifier: Apache-2.0
+
+use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
+use crate::schema::profiles;
 
 #[derive(Debug, Queryable, Selectable, Serialize, Deserialize)]
-#[diesel(table_name = crate::schema::profiles)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
+#[diesel(table_name = profiles)]
 pub struct Profile {
-    pub id: String,
+    pub id: i32,
     pub owner_address: String,
-    pub username: Option<String>,
+    pub username: String,
     pub display_name: Option<String>,
     pub bio: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub last_activity_at: Option<DateTime<Utc>>,
-    pub followers_count: i32,
-    pub following_count: i32,
-    pub content_count: i32,
-    pub platforms_joined: i32,
+    pub avatar_url: Option<String>,
+    pub website_url: Option<String>,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
 }
 
-#[derive(Debug, Insertable, AsChangeset)]
-#[diesel(table_name = crate::schema::profiles)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
+#[derive(Debug, Insertable, Serialize, Deserialize)]
+#[diesel(table_name = profiles)]
 pub struct NewProfile {
-    pub id: String,
     pub owner_address: String,
-    pub username: Option<String>,
+    pub username: String,
     pub display_name: Option<String>,
     pub bio: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub last_activity_at: Option<DateTime<Utc>>,
-    pub followers_count: i32,
-    pub following_count: i32,
-    pub content_count: i32,
-    pub platforms_joined: i32,
+    pub avatar_url: Option<String>,
+    pub website_url: Option<String>,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
 }
 
-#[derive(Debug, Queryable, Selectable, Serialize, Deserialize)]
-#[diesel(table_name = crate::schema::follows)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct Follow {
-    pub follower_id: String,
-    pub following_id: String,
-    pub followed_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Insertable, AsChangeset)]
-#[diesel(table_name = crate::schema::follows)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct NewFollow {
-    pub follower_id: String,
-    pub following_id: String,
-    pub followed_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Queryable, Selectable, Serialize, Deserialize)]
-#[diesel(table_name = crate::schema::profile_platform_links)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct ProfilePlatformLink {
-    pub profile_id: String,
-    pub platform_id: String,
-    pub joined_at: DateTime<Utc>,
-    pub last_active_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Insertable, AsChangeset)]
-#[diesel(table_name = crate::schema::profile_platform_links)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct NewProfilePlatformLink {
-    pub profile_id: String,
-    pub platform_id: String,
-    pub joined_at: DateTime<Utc>,
-    pub last_active_at: Option<DateTime<Utc>>,
+#[derive(Debug, AsChangeset, Serialize, Deserialize)]
+#[diesel(table_name = profiles)]
+pub struct UpdateProfile {
+    pub display_name: Option<String>,
+    pub bio: Option<String>,
+    pub avatar_url: Option<String>,
+    pub website_url: Option<String>,
 }

@@ -29,36 +29,17 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/mys_social_indexer
-      - CHECKPOINT_URL=https://checkpoints.mainnet.mysocial.io
-      - INITIAL_CHECKPOINT=0
-      - CONCURRENCY=5
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/myso_social_indexer
+      - DATABASE_MAX_CONNECTIONS=10
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8080
+      - CHECKPOINT_URL=https://checkpoints.testnet.mysocial.network
+      - START_CHECKPOINT=0
+      - INDEXER_CONCURRENCY=5
       - RUST_LOG=info,mys_social_indexer=debug
-      - API_HOST=0.0.0.0
-      - API_PORT=3000
-      - METRICS_PORT=9000
+      - PROFILE_PACKAGE_ADDRESS=0x61e95f6a3382232579263b473847d00ac1d56dbe69e22674de7d35b4ce26e588
     ports:
-      - "3000:3000"
-      - "9000:9000"
-    volumes:
-      - indexer_data:/app/data
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: mys-social-indexer-grafana
-    restart: always
-    depends_on:
-      - postgres
-    ports:
-      - "3001:3000"
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-    volumes:
-      - grafana_data:/var/lib/grafana
+      - "8080:8080"
 
 volumes:
   postgres_data:
-  indexer_data:
-  grafana_data:
