@@ -43,9 +43,23 @@ fn create_router(db: Arc<Database>) -> Router {
         .route("/health", get(handlers::health::health_check))
         
         // Profile routes
-        .route("/profiles", get(handlers::profiles::get_profiles))
-        .route("/profiles/:address", get(handlers::profiles::get_profile_by_address))
-        .route("/profiles/username/:username", get(handlers::profiles::get_profile_by_username))
+        .route("/recent-profiles", get(handlers::profiles::latest_profiles))
+        .route("/profile/:address", get(handlers::profiles::get_profile_by_address))
+        .route("/profile/username/:username", get(handlers::profiles::get_profile_by_username))
+        
+        // Platform routes
+        .route("/platforms", get(handlers::platforms::get_platforms))
+        .route("/platforms/approved", get(handlers::platforms::get_approved_platforms))
+        .route("/platform/:platform_id", get(handlers::platforms::get_platform_by_id))
+        .route("/platform/:platform_id/approval", get(handlers::platforms::get_platform_approval_status))
+        .route("/platform/:platform_id/moderators", get(handlers::platforms::get_platform_moderators))
+        .route("/platform/:platform_id/blocked", get(handlers::platforms::get_platform_blocked_profiles))
+        
+        // Social graph routes
+        .route("/profile/following/:profile_id", get(handlers::social_graph::get_following))
+        .route("/profile/followers/:profile_id", get(handlers::social_graph::get_followers))
+        .route("/profile/is-following/:follower_profile_id/:following_profile_id", get(handlers::social_graph::check_following))
+        .route("/profile/stats/:profile_id", get(handlers::social_graph::get_follow_stats))
         
         // Add shared state
         .with_state(pool)

@@ -15,13 +15,14 @@ use mys_sdk::{
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::get_profile_package_address;
 
 /// Type for events received from the blockchain
 #[derive(Debug)]
 pub struct BlockchainEvent {
     /// Transaction digest
     pub tx_digest: String,
+    /// Unique event ID (in format <digest>:<event_seq>)
+    pub event_id: String,
     /// Event type
     pub event_type: String,
     /// Event data as JSON
@@ -34,18 +35,16 @@ pub struct BlockchainEvent {
 pub struct BlockchainEventListener {
     /// Configuration
     config: Config,
-    /// Database connection
-    db: Arc<Database>,
     /// Event handler channels
     event_senders: Mutex<Vec<mpsc::Sender<BlockchainEvent>>>,
 }
 
 impl BlockchainEventListener {
     /// Create a new blockchain event listener
-    pub fn new(config: Config, db: Arc<Database>) -> Self {
+    pub fn new(config: Config, _db: Arc<Database>) -> Self {
+        // Note: db parameter kept for API compatibility but not used
         Self {
             config,
-            db,
             event_senders: Mutex::new(Vec::new()),
         }
     }
@@ -78,16 +77,19 @@ impl BlockchainEventListener {
             
         info!("Connected to blockchain node: {}", self.config.blockchain.ws_url);
         
-        // Get the profile package address
-        let profile_address = get_profile_package_address();
-        info!("Filtering events for profile package: {}", profile_address);
+        // Get the addresses of all packages to monitor
+        let package_addresses = crate::get_monitored_package_addresses();
+        for address in &package_addresses {
+            info!("Monitoring events for package: {}", address);
+        }
         
         // Create event filter for all events
+        // This will capture all events - we'll filter by package and module in our handlers
         let event_filter = EventFilter::All([]);
         
         // Subscribe to events
         let mut event_stream = client.event_api().subscribe_event(event_filter).await?;
-        info!("Successfully subscribed to profile events");
+        info!("Successfully subscribed to blockchain events");
         
         // Process events as they arrive
         while let Some(event_result) = event_stream.next().await {
@@ -109,9 +111,64 @@ impl BlockchainEventListener {
                     // Get the parsed JSON data
                     let parsed_data = event.parsed_json.clone();
                     
+                    // Log the complete raw event structure for detailed debugging
+                    tracing::info!("Complete raw blockchain event JSON: {}", serde_json::to_string_pretty(&event).unwrap_or_default());
+                    tracing::info!("Parsed JSON data: {}", serde_json::to_string_pretty(&parsed_data).unwrap_or_default());
+                    
+                    // Log all events that might be relevant
+                    if event.type_.to_string().contains("::profile::") || 
+                       event.type_.to_string().contains("::social_graph::") ||
+                       event.type_.to_string().contains("::FollowEvent") ||
+                       event.type_.to_string().contains("::UnfollowEvent") ||
+                       event.type_.to_string().contains("::platform::") ||
+                       event.type_.to_string().contains("::Platform") {
+                        tracing::info!("SOCIAL/PLATFORM EVENT DETECTED - Analyzing structure...");
+                        
+                        // Log the event type
+                        tracing::info!("Event type: {}", event.type_);
+                        
+                        // Try to look into the parsed_json structure
+                        if let Some(obj) = parsed_data.as_object() {
+                            tracing::info!("Top-level keys: {:?}", obj.keys().collect::<Vec<_>>());
+                            
+                            // Check if this contains a Move object with fields
+                            if let Some(fields) = obj.get("fields") {
+                                tracing::info!("Move object fields found: {}", serde_json::to_string_pretty(fields).unwrap_or_default());
+                                
+                                // Look specifically for content fields
+                                if let Some(content) = obj.get("content") {
+                                    tracing::info!("Content section found: {}", serde_json::to_string_pretty(content).unwrap_or_default());
+                                    
+                                    // Try to extract fields from content section
+                                    if let Some(content_obj) = content.as_object() {
+                                        if let Some(content_fields) = content_obj.get("fields") {
+                                            tracing::info!("Content fields section found: {}", serde_json::to_string_pretty(content_fields).unwrap_or_default());
+                                        }
+                                    }
+                                }
+                                
+                                // Look for specific fields we need
+                                tracing::info!("Looking for specific fields...");
+                                for field_name in ["bio", "profile_picture", "cover_photo"] {
+                                    if let Some(field_value) = obj.get(field_name) {
+                                        tracing::info!("Found '{}' at top level: {}", field_name, field_value);
+                                    } else if let Some(fields_obj) = fields.as_object() {
+                                        if let Some(field_value) = fields_obj.get(field_name) {
+                                            tracing::info!("Found '{}' in fields section: {}", field_name, field_value);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Generate event ID
+                    let event_id = format!("{}:{}", event.id.tx_digest, event.id.event_seq); 
+                    
                     // Convert to blockchain event
                     let blockchain_event = BlockchainEvent {
                         tx_digest: event.id.tx_digest.to_string(),
+                        event_id,
                         event_type: event.type_.to_string(),
                         data: parsed_data,
                         timestamp_ms,
@@ -141,11 +198,14 @@ impl BlockchainEventListener {
             
         info!("Connected to blockchain node: {}", self.config.blockchain.rpc_url);
         
-        // Get the profile package address
-        let profile_address = get_profile_package_address();
-        info!("Filtering events for profile package: {}", profile_address);
+        // Get the addresses of all packages to monitor
+        let package_addresses = crate::get_monitored_package_addresses();
+        for address in &package_addresses {
+            info!("Monitoring events for package: {}", address);
+        }
         
         // Create event filter for all events
+        // This will capture all events - we'll filter by package and module in our handlers
         let event_filter = EventFilter::All([]);
         
         // Create polling interval
@@ -198,9 +258,13 @@ impl BlockchainEventListener {
                         // Get the parsed JSON data
                         let parsed_data = event.parsed_json.clone();
                         
+                        // Generate the event ID in format <digest>:<event_seq>
+                        let event_id = format!("{}:{}", event.id.tx_digest, event.id.event_seq);
+                        
                         // Convert to blockchain event
                         let blockchain_event = BlockchainEvent {
                             tx_digest: event.id.tx_digest.to_string(),
+                            event_id,
                             event_type: event.type_.to_string(),
                             data: parsed_data,
                             timestamp_ms,
@@ -235,6 +299,7 @@ impl Clone for BlockchainEvent {
     fn clone(&self) -> Self {
         Self {
             tx_digest: self.tx_digest.clone(),
+            event_id: self.event_id.clone(),
             event_type: self.event_type.clone(),
             data: self.data.clone(),
             timestamp_ms: self.timestamp_ms,

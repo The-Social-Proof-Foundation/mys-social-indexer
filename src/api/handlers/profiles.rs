@@ -19,15 +19,24 @@ use crate::schema::profiles;
 pub struct ProfileQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    pub page: Option<i64>,
 }
 
-/// Get a list of profiles with pagination
-pub async fn get_profiles(
+/// Get a list of latest profiles with pagination in descending order by id
+pub async fn latest_profiles(
     State(db_pool): State<DbPool>,
     Query(query): Query<ProfileQuery>,
 ) -> impl IntoResponse {
     let limit = query.limit.unwrap_or(50);
     let offset = query.offset.unwrap_or(0);
+    let page = query.page.unwrap_or(1);
+    
+    // If page is provided, calculate the offset
+    let offset = if page > 1 {
+        (page - 1) * limit
+    } else {
+        offset
+    };
     
     let mut conn = match db_pool.get().await {
         Ok(conn) => conn,
@@ -41,14 +50,39 @@ pub async fn get_profiles(
         }
     };
     
+    // Get total count for pagination info
+    let total_count = match profiles::table
+        .count()
+        .get_result::<i64>(&mut conn)
+        .await {
+        Ok(count) => count,
+        Err(_) => 0,
+    };
+    
+    let total_pages = (total_count as f64 / limit as f64).ceil() as i64;
+    
+    // Get profiles in descending order by id
     let profiles_result = profiles::table
+        .order_by(profiles::id.desc())
         .limit(limit)
         .offset(offset)
         .load::<Profile>(&mut conn)
         .await;
     
     match profiles_result {
-        Ok(profiles) => (StatusCode::OK, Json(serde_json::to_value(profiles).unwrap_or_default())),
+        Ok(profiles) => (
+            StatusCode::OK, 
+            Json(serde_json::json!({
+                "profiles": profiles,
+                "pagination": {
+                    "total": total_count,
+                    "limit": limit,
+                    "offset": offset,
+                    "page": page,
+                    "total_pages": total_pages
+                }
+            }))
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({

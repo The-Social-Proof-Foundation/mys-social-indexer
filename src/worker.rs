@@ -13,16 +13,22 @@ use crate::events::{
     parse_event,
     MODULE_PREFIX_PROFILE, MODULE_PREFIX_PLATFORM, MODULE_PREFIX_CONTENT,
     MODULE_PREFIX_BLOCK_LIST, MODULE_PREFIX_MY_IP, MODULE_PREFIX_FEE_DISTRIBUTION,
-    ProfileCreatedEvent, PlatformCreatedEvent, ContentCreatedEvent, ContentInteractionEvent,
+    MODULE_PREFIX_SOCIAL_GRAPH,
+    ProfileCreatedEvent, ProfileUpdatedEvent, UsernameUpdatedEvent, UsernameRegisteredEvent, 
+    PlatformCreatedEvent, ContentCreatedEvent, ContentInteractionEvent,
     EntityBlockedEvent, IPRegisteredEvent, LicenseGrantedEvent, ProofCreatedEvent,
     FeeModelCreatedEvent, FeesDistributedEvent, ProfileFollowEvent, ProfileJoinedPlatformEvent,
+    FollowEvent, UnfollowEvent,
+    PlatformBlockedProfileEvent, PlatformUnblockedProfileEvent, UserJoinedPlatformEvent, UserLeftPlatformEvent,
 };
-use crate::models::profile::{NewProfile, NewFollow, NewProfilePlatformLink};
-use crate::models::platform::NewPlatform;
-use crate::models::content::{NewContent, NewContentInteraction};
-use crate::models::block_list::NewBlock;
-use crate::models::intellectual_property::{NewIntellectualProperty, NewIPLicense, NewProofOfCreativity};
-use crate::models::fee_distribution::{NewFeeModel, NewFeeDistribution, NewFeeRecipient, NewFeeRecipientPayment};
+use crate::models::profile::{NewProfile, NewFollow, NewProfilePlatformLink, UpdateProfile};
+use crate::models::username::{NewUsername, UpdateUsername, NewUsernameHistory};
+// These model imports will be added when we implement these features
+//use crate::models::platform::NewPlatform;
+//use crate::models::content::{NewContent, NewContentInteraction};
+//use crate::models::block_list::NewBlock;
+//use crate::models::intellectual_property::{NewIntellectualProperty, NewIPLicense, NewProofOfCreativity};
+//use crate::models::fee_distribution::{NewFeeModel, NewFeeDistribution, NewFeeRecipient, NewFeeRecipientPayment};
 use crate::models::statistics::{NewDailyStatistics, NewPlatformDailyStatistics};
 use crate::models::indexer::NewIndexerProgress;
 use crate::schema;
@@ -74,17 +80,75 @@ impl SocialIndexerWorker {
     async fn process_profile_created(&self, event: &ProfileCreatedEvent) -> Result<()> {
         let mut conn = self.get_connection().await?;
         
+        info!("Processing ProfileCreatedEvent: profile_id={}, username={:?}", 
+              event.profile_id, event.username);
+        
         // Convert event to database model
         let new_profile = event.into_model()?;
         
         // Insert the profile
-        diesel::insert_into(schema::profiles::table)
+        let result = diesel::insert_into(schema::profiles::table)
             .values(&new_profile)
             .on_conflict(schema::profiles::id)
             .do_update()
             .set(&new_profile)
-            .execute(&mut conn)
+            .returning(schema::profiles::id) // Return the profile ID
+            .get_result::<i32>(&mut conn)
             .await?;
+            
+        let profile_id = result; // This is the newly created profile's ID
+        
+        // If the profile has a username, add it to the usernames table
+        if let Some(username) = &event.username {
+            info!("Profile has username: {}, adding to usernames table", username);
+            
+            // Check if the username already exists in the usernames table
+            let username_exists = schema::usernames::table
+                .filter(schema::usernames::profile_id.eq(profile_id))
+                .filter(schema::usernames::username.eq(username))
+                .first::<crate::models::username::Username>(&mut conn)
+                .await.is_ok();
+                
+            if !username_exists {
+                // Convert timestamp to NaiveDateTime
+                let registered_at = DateTime::from_timestamp(event.created_at as i64, 0)
+                    .unwrap_or(Utc::now())
+                    .naive_utc();
+                
+                // Create a new username record
+                let new_username = NewUsername {
+                    profile_id,
+                    username: username.clone(),
+                    registered_at,
+                    updated_at: registered_at,
+                };
+                
+                // Insert the username
+                info!("Inserting username record into usernames table");
+                match diesel::insert_into(schema::usernames::table)
+                    .values(&new_username)
+                    .execute(&mut conn)
+                    .await {
+                    Ok(rows) => info!("Successfully inserted {} username record(s) for: {}", rows, username),
+                    Err(e) => error!("Failed to insert username record: {}", e)
+                };
+                
+                // Verify the insertion worked
+                info!("Verifying username insertion");
+                match schema::usernames::table
+                    .filter(schema::usernames::profile_id.eq(profile_id))
+                    .filter(schema::usernames::username.eq(username))
+                    .first::<crate::models::username::Username>(&mut conn)
+                    .await {
+                    Ok(username_rec) => info!("Verified username record exists: id={}, username={}", username_rec.id, username_rec.username),
+                    Err(e) => error!("Username record not found after insertion: {}", e)
+                }
+            } else {
+                info!("Username already exists in usernames table for this profile");
+            }
+        } else {
+            info!("Profile doesn't have a username, skipping usernames table insertion");
+        }
             
         // Update daily statistics
         self.update_daily_stats(|stats| {
@@ -94,6 +158,265 @@ impl SocialIndexerWorker {
         info!("Processed profile created: {}", event.profile_id);
         Ok(())
     }
+    
+    /// Process a profile updated event
+    async fn process_profile_updated(&self, event: &ProfileUpdatedEvent) -> Result<()> {
+        let mut conn = self.get_connection().await?;
+        
+        // Find the profile by profile_id
+        let profile = schema::profiles::table
+            .filter(schema::profiles::profile_id.eq(&event.profile_id))
+            .first::<crate::models::profile::Profile>(&mut conn)
+            .await?;
+        
+        // Log all fields for debugging
+        info!("Processing ProfileUpdatedEvent:");
+        info!("  profile_id: {}", event.profile_id);
+        info!("  display_name: {:?}", event.display_name);
+        info!("  bio: {:?}", event.bio);
+        info!("  profile_photo: {:?}", event.profile_photo);
+        info!("  cover_photo: {:?}", event.cover_photo);
+        info!("  website: {:?}", event.website);
+        
+        // For existing profile in database:
+        info!("Existing profile in database:");
+        info!("  id: {}", profile.id);
+        info!("  display_name: {:?}", profile.display_name);
+        info!("  bio: {:?}", profile.bio);
+        info!("  profile_photo: {:?}", profile.profile_photo);
+        info!("  cover_photo: {:?}", profile.cover_photo);
+        info!("  website: {:?}", profile.website);
+        
+        // Create an update model - use existing values when event doesn't provide them
+        // Use website field from event if provided, otherwise keep existing
+        
+        let update = UpdateProfile {
+            display_name: event.display_name.clone(),
+            bio: if event.bio.is_some() { event.bio.clone() } else { profile.bio.clone() },
+            profile_photo: if event.profile_photo.is_some() { event.profile_photo.clone() } else { profile.profile_photo.clone() },
+            website: event.website.clone(),  // Use new website field from event
+            cover_photo: if event.cover_photo.is_some() { event.cover_photo.clone() } else { profile.cover_photo.clone() },
+            sensitive_data_updated_at: Some(DateTime::from_timestamp(event.updated_at as i64, 0)
+                .unwrap_or(Utc::now())
+                .naive_utc()),
+            // Include all sensitive fields from the event
+            birthdate: event.birthdate.clone(),
+            current_location: event.current_location.clone(),
+            raised_location: event.raised_location.clone(),
+            phone: event.phone.clone(),
+            email: event.email.clone(),
+            gender: event.gender.clone(),
+            political_view: event.political_view.clone(),
+            religion: event.religion.clone(),
+            education: event.education.clone(),
+            primary_language: event.primary_language.clone(),
+            relationship_status: event.relationship_status.clone(),
+            x_username: event.x_username.clone(),
+            mastodon_username: event.mastodon_username.clone(),
+            facebook_username: event.facebook_username.clone(),
+            reddit_username: event.reddit_username.clone(),
+            github_username: event.github_username.clone(),
+        };
+        
+        info!("Updating profile with:");
+        info!("  display_name: {:?}", update.display_name);
+        info!("  bio: {:?}", update.bio);
+        info!("  profile_photo: {:?}", update.profile_photo);
+        info!("  website: {:?}", update.website);
+        info!("  cover_photo: {:?}", update.cover_photo);
+        
+        // Update the profile
+        diesel::update(schema::profiles::table.find(profile.id))
+            .set(&update)
+            .execute(&mut conn)
+            .await?;
+            
+        info!("Processed profile updated: {}", event.profile_id);
+        Ok(())
+    }
+    
+    /// Process a username updated event
+    async fn process_username_updated(&self, event: &UsernameUpdatedEvent) -> Result<()> {
+        let mut conn = self.get_connection().await?;
+        
+        // Find the profile by profile_id
+        let profile = schema::profiles::table
+            .filter(schema::profiles::profile_id.eq(&event.profile_id))
+            .first::<crate::models::profile::Profile>(&mut conn)
+            .await?;
+        
+        // Update the profile table's username column (for backward compatibility)
+        diesel::update(schema::profiles::table.find(profile.id))
+            .set(schema::profiles::username.eq(&event.new_username))
+            .execute(&mut conn)
+            .await?;
+        
+        // Check if the username exists in the usernames table
+        let username_result = schema::usernames::table
+            .filter(schema::usernames::profile_id.eq(profile.id))
+            .first::<crate::models::username::Username>(&mut conn)
+            .await;
+            
+        let now = Utc::now().naive_utc();
+        
+        // If the username record exists, update it
+        if let Ok(username) = username_result {
+            // Update the username in the usernames table
+            diesel::update(schema::usernames::table.find(username.id))
+                .set(UpdateUsername {
+                    username: Some(event.new_username.clone()),
+                    updated_at: Some(now),
+                })
+                .execute(&mut conn)
+                .await?;
+        } else {
+            // If username doesn't exist, create a new record
+            let new_username = NewUsername {
+                profile_id: profile.id,
+                username: event.new_username.clone(),
+                registered_at: now,
+                updated_at: now,
+            };
+            
+            diesel::insert_into(schema::usernames::table)
+                .values(&new_username)
+                .execute(&mut conn)
+                .await?;
+        }
+        
+        // Create a history record of the username change
+        let history_record = NewUsernameHistory {
+            profile_id: profile.id,
+            old_username: event.old_username.clone(),
+            new_username: event.new_username.clone(),
+            changed_at: now,
+        };
+        
+        diesel::insert_into(schema::username_history::table)
+            .values(&history_record)
+            .execute(&mut conn)
+            .await?;
+            
+        info!("Processed username updated: {} -> {}", event.old_username, event.new_username);
+        Ok(())
+    }
+    
+    /// Process a username registered event
+    async fn process_username_registered(&self, event: &UsernameRegisteredEvent) -> Result<()> {
+        let mut conn = self.get_connection().await?;
+        
+        info!("Processing UsernameRegisteredEvent: {:?}", event);
+        
+        // Find the profile by profile_id
+        let profile_result = schema::profiles::table
+            .filter(schema::profiles::profile_id.eq(&event.profile_id))
+            .first::<crate::models::profile::Profile>(&mut conn)
+            .await;
+        
+        match profile_result {
+            Ok(profile) => {
+                info!("Found profile with ID: {} for username: {}", profile.id, event.username);
+                
+                // Update the profile table's username column (for backward compatibility)
+                diesel::update(schema::profiles::table.find(profile.id))
+                    .set(schema::profiles::username.eq(&event.username))
+                    .execute(&mut conn)
+                    .await?;
+                    
+                // Check if the username already exists in the usernames table
+                let username_exists = schema::usernames::table
+                    .filter(schema::usernames::profile_id.eq(profile.id))
+                    .filter(schema::usernames::username.eq(&event.username))
+                    .first::<crate::models::username::Username>(&mut conn)
+                    .await.is_ok();
+                
+                // Get timestamp from event or create a default one
+                let now = if event.registered_at > 0 {
+                    chrono::DateTime::from_timestamp(event.registered_at as i64, 0)
+                        .unwrap_or(Utc::now())
+                        .naive_utc()
+                } else {
+                    Utc::now().naive_utc()
+                };
+                    
+                // Only insert if it doesn't exist
+                if !username_exists {
+                    info!("Username doesn't exist in the usernames table, inserting new record");
+                    
+                    let new_username = NewUsername {
+                        profile_id: profile.id,
+                        username: event.username.clone(),
+                        registered_at: now,
+                        updated_at: now,
+                    };
+                    
+                    // Insert the username
+                    let result = diesel::insert_into(schema::usernames::table)
+                        .values(&new_username)
+                        .execute(&mut conn)
+                        .await;
+                        
+                    match result {
+                        Ok(_) => info!("Successfully inserted username record"),
+                        Err(e) => error!("Failed to insert username record: {}", e)
+                    }
+                    
+                    // Verify the username was inserted correctly
+                    match schema::usernames::table
+                        .filter(schema::usernames::profile_id.eq(profile.id))
+                        .filter(schema::usernames::username.eq(&event.username))
+                        .first::<crate::models::username::Username>(&mut conn)
+                        .await {
+                        Ok(username) => info!("Verified username record exists: id={}, username={}", username.id, username.username),
+                        Err(e) => error!("Failed to verify username record: {}", e)
+                    }
+                } else {
+                    info!("Username already exists in the usernames table, skipping insertion");
+                }
+            },
+            Err(_) => {
+                // Profile doesn't exist yet, likely because events are processed out of order
+                warn!("Profile not found for profile_id: {}. UsernameRegisteredEvent will be handled when profile is created", event.profile_id);
+                
+                // Try to find a profile with a matching username
+                let profile_by_username = schema::profiles::table
+                    .filter(schema::profiles::username.eq(&event.username))
+                    .first::<crate::models::profile::Profile>(&mut conn)
+                    .await;
+                
+                if let Ok(profile) = profile_by_username {
+                    info!("Found profile with username: {}, using that instead", event.username);
+                    
+                    // Create a new username record
+                    let now = Utc::now().naive_utc();
+                    let new_username = NewUsername {
+                        profile_id: profile.id,
+                        username: event.username.clone(),
+                        registered_at: now,
+                        updated_at: now,
+                    };
+                    
+                    // Try to insert the username for this profile
+                    match diesel::insert_into(schema::usernames::table)
+                        .values(&new_username)
+                        .on_conflict_do_nothing()
+                        .execute(&mut conn)
+                        .await {
+                        Ok(_) => info!("Created username record for existing profile with matching username"),
+                        Err(e) => error!("Failed to create username record: {}", e)
+                    }
+                } else {
+                    warn!("No profile found with username {}. Event will be processed when profile is created", event.username);
+                }
+            }
+        }
+        
+        info!("Processed username registered: {} for profile {}", event.username, event.profile_id);
+        Ok(())
+    }
+    
+    // Private data update functionality has been removed
+    // All sensitive fields are now stored directly in the profile
     
     /// Process a profile follow event
     async fn process_profile_follow(&self, event: &ProfileFollowEvent) -> Result<()> {
@@ -549,6 +872,95 @@ impl SocialIndexerWorker {
             
         Ok(())
     }
+
+    /// Process a platform blocked profile event
+    async fn process_platform_blocked_profile(&self, event: &PlatformBlockedProfileEvent) -> Result<()> {
+        let mut conn = self.get_connection().await?;
+        let now = Utc::now().naive_utc();
+        
+        // Create new blocked profile record
+        let new_blocked_profile = NewPlatformBlockedProfile {
+            platform_id: event.platform_id.clone(),
+            profile_id: event.profile_id.clone(),
+            blocked_by: event.blocked_by.clone(),
+            created_at: now,
+            is_blocked: true,
+        };
+        
+        // Insert the blocked profile record
+        diesel::insert_into(schema::platform_blocked_profiles::table)
+            .values(&new_blocked_profile)
+            .execute(&mut conn)
+            .await?;
+            
+        info!("Processed platform blocked profile: platform={}, profile={}", 
+              event.platform_id, event.profile_id);
+        Ok(())
+    }
+    
+    /// Process a platform unblocked profile event
+    async fn process_platform_unblocked_profile(&self, event: &PlatformUnblockedProfileEvent) -> Result<()> {
+        let mut conn = self.get_connection().await?;
+        let now = Utc::now().naive_utc();
+        
+        // Delete the blocked profile record
+        diesel::delete(schema::platform_blocked_profiles::table)
+            .filter(schema::platform_blocked_profiles::platform_id.eq(&event.platform_id))
+            .filter(schema::platform_blocked_profiles::profile_id.eq(&event.profile_id))
+            .execute(&mut conn)
+            .await?;
+            
+        info!("Processed platform unblocked profile: platform={}, profile={}", 
+              event.platform_id, event.profile_id);
+        Ok(())
+    }
+    
+    /// Process a user joined platform event
+    async fn process_user_joined_platform(&self, event: &UserJoinedPlatformEvent) -> Result<()> {
+        let mut conn = self.get_connection().await?;
+        let now = Utc::now().naive_utc();
+        
+        // Create new platform relationship record
+        let new_relationship = NewPlatformRelationship {
+            platform_id: event.platform_id.clone(),
+            profile_id: event.profile_id.clone(),
+            joined_at: now,
+            left_at: None,
+        };
+        
+        // Insert the platform relationship record
+        diesel::insert_into(schema::platform_relationships::table)
+            .values(&new_relationship)
+            .execute(&mut conn)
+            .await?;
+            
+        info!("Processed user joined platform: platform={}, profile={}", 
+              event.platform_id, event.profile_id);
+        Ok(())
+    }
+    
+    /// Process a user left platform event
+    async fn process_user_left_platform(&self, event: &UserLeftPlatformEvent) -> Result<()> {
+        let mut conn = self.get_connection().await?;
+        let now = Utc::now().naive_utc();
+        
+        // Update the platform relationship record to set left_at
+        let update = UpdatePlatformRelationship {
+            left_at: Some(now),
+        };
+        
+        diesel::update(schema::platform_relationships::table)
+            .filter(schema::platform_relationships::platform_id.eq(&event.platform_id))
+            .filter(schema::platform_relationships::profile_id.eq(&event.profile_id))
+            .filter(schema::platform_relationships::left_at.is_null())
+            .set(&update)
+            .execute(&mut conn)
+            .await?;
+            
+        info!("Processed user left platform: platform={}, profile={}", 
+              event.platform_id, event.profile_id);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -565,16 +977,91 @@ impl Worker for SocialIndexerWorker {
             for event in &transaction.events {
                 let type_str = &event.type_;
                 
+                // Log all events for debugging
+                info!("Processing event of type: {}", type_str);
+                
                 // Process events by module
                 match type_str {
                     // Profile events
                     t if t.starts_with(MODULE_PREFIX_PROFILE) && t.ends_with("ProfileCreatedEvent") => {
-                        if let Ok(event) = parse_event::<ProfileCreatedEvent>(event) {
-                            if let Err(e) = self.process_profile_created(&event).await {
-                                error!("Failed to process ProfileCreatedEvent: {}", e);
+                        // Log the raw event for better debugging
+                        info!("Raw ProfileCreatedEvent data: {}", serde_json::to_string_pretty(&event).unwrap_or_default());
+                        
+                        match parse_event::<ProfileCreatedEvent>(event) {
+                            Ok(event) => {
+                                info!("Successfully parsed ProfileCreatedEvent with fields:");
+                                info!("  profile_id: {}", event.profile_id);
+                                info!("  owner_address: {}", event.owner_address);
+                                info!("  username: {:?}", event.username);
+                                info!("  display_name: {}", event.display_name);
+                                info!("  bio: {:?}", event.bio);
+                                info!("  profile_photo: {:?}", event.profile_photo);
+                                info!("  cover_photo: {:?}", event.cover_photo);
+                                
+                                if let Err(e) = self.process_profile_created(&event).await {
+                                    error!("Failed to process ProfileCreatedEvent: {}", e);
+                                }
+                            },
+                            Err(e) => {
+                                error!("Failed to parse ProfileCreatedEvent: {}", e);
+                                // Log full event for debugging
+                                error!("Event data: {}", serde_json::to_string_pretty(event).unwrap_or_default());
                             }
                         }
                     },
+                    t if t.starts_with(MODULE_PREFIX_PROFILE) && t.ends_with("ProfileUpdatedEvent") => {
+                        // Log the raw event for better debugging
+                        info!("Raw ProfileUpdatedEvent data: {}", serde_json::to_string_pretty(&event).unwrap_or_default());
+                        
+                        match parse_event::<ProfileUpdatedEvent>(event) {
+                            Ok(event) => {
+                                info!("Successfully parsed ProfileUpdatedEvent with fields:");
+                                info!("  profile_id: {}", event.profile_id);
+                                info!("  owner_address: {}", event.owner_address);
+                                info!("  username: {:?}", event.username);
+                                info!("  display_name: {:?}", event.display_name);
+                                info!("  bio: {:?}", event.bio);
+                                info!("  profile_photo: {:?}", event.profile_photo);
+                                info!("  cover_photo: {:?}", event.cover_photo);
+                                
+                                if let Err(e) = self.process_profile_updated(&event).await {
+                                    error!("Failed to process ProfileUpdatedEvent: {}", e);
+                                }
+                            },
+                            Err(e) => {
+                                error!("Failed to parse ProfileUpdatedEvent: {}", e);
+                                // Log full event for debugging
+                                error!("Event data: {}", serde_json::to_string_pretty(event).unwrap_or_default());
+                            }
+                        }
+                    },
+                    t if t.starts_with(MODULE_PREFIX_PROFILE) && t.ends_with("UsernameUpdatedEvent") => {
+                        if let Ok(event) = parse_event::<UsernameUpdatedEvent>(event) {
+                            if let Err(e) = self.process_username_updated(&event).await {
+                                error!("Failed to process UsernameUpdatedEvent: {}", e);
+                            }
+                        }
+                    },
+                    t if t.starts_with(MODULE_PREFIX_PROFILE) && t.ends_with("UsernameRegisteredEvent") => {
+                        info!("Found a UsernameRegisteredEvent: {}", serde_json::to_string_pretty(event).unwrap_or_default());
+                        match parse_event::<UsernameRegisteredEvent>(event) {
+                            Ok(event) => {
+                                info!("Successfully parsed UsernameRegisteredEvent: profile_id={}, username={}", 
+                                       event.profile_id, event.username);
+                                
+                                if let Err(e) = self.process_username_registered(&event).await {
+                                    error!("Failed to process UsernameRegisteredEvent: {}", e);
+                                }
+                            },
+                            Err(e) => {
+                                error!("Failed to parse UsernameRegisteredEvent: {}", e);
+                                // Dump the full event for debugging
+                                error!("Raw event data: {}", serde_json::to_string_pretty(event).unwrap_or_default());
+                            }
+                        }
+                    },
+                    // Private data update functionality has been removed
+                    // All sensitive fields are now stored directly in the profile
                     t if t.starts_with(MODULE_PREFIX_SOCIAL_GRAPH) && t.ends_with("ProfileFollowEvent") => {
                         if let Ok(event) = parse_event::<ProfileFollowEvent>(event) {
                             if let Err(e) = self.process_profile_follow(&event).await {
@@ -583,18 +1070,234 @@ impl Worker for SocialIndexerWorker {
                         }
                     },
                     
-                    // Platform events
-                    t if t.starts_with(MODULE_PREFIX_PLATFORM) && t.ends_with("PlatformCreatedEvent") => {
-                        if let Ok(event) = parse_event::<PlatformCreatedEvent>(event) {
-                            if let Err(e) = self.process_platform_created(&event).await {
-                                error!("Failed to process PlatformCreatedEvent: {}", e);
+                    // Social Graph events from social_graph module
+                    t if t.starts_with(MODULE_PREFIX_SOCIAL_GRAPH) && t.ends_with("FollowEvent") => {
+                        info!("Processing social graph FollowEvent");
+                        if let Ok(event) = parse_event::<FollowEvent>(event) {
+                            // Create a database connection
+                            let mut conn = match self.get_connection().await {
+                                Ok(conn) => conn,
+                                Err(e) => {
+                                    error!("Failed to get database connection: {}", e);
+                                    continue;
+                                }
+                            };
+                            
+                            // Get profile IDs from addresses
+                            let follower_profile = match schema::profiles::table
+                                .filter(schema::profiles::owner_address.eq(&event.follower))
+                                .select((schema::profiles::id, schema::profiles::owner_address))
+                                .first::<(i32, String)>(&mut conn)
+                                .await {
+                                Ok(profile) => profile,
+                                Err(e) => {
+                                    error!("Failed to find follower profile for address {}: {}", event.follower, e);
+                                    continue;
+                                }
+                            };
+                                
+                            let following_profile = match schema::profiles::table
+                                .filter(schema::profiles::owner_address.eq(&event.following))
+                                .select((schema::profiles::id, schema::profiles::owner_address))
+                                .first::<(i32, String)>(&mut conn)
+                                .await {
+                                Ok(profile) => profile,
+                                Err(e) => {
+                                    error!("Failed to find following profile for address {}: {}", event.following, e);
+                                    continue;
+                                }
+                            };
+                            
+                            // Create relationship
+                            let relationship = match event.into_relationship(follower_profile.0, following_profile.0) {
+                                Ok(rel) => rel,
+                                Err(e) => {
+                                    error!("Failed to create relationship: {}", e);
+                                    continue;
+                                }
+                            };
+                            
+                            // Check if relationship already exists
+                            let existing = match schema::social_graph_relationships::table
+                                .filter(schema::social_graph_relationships::follower_id.eq(follower_profile.0))
+                                .filter(schema::social_graph_relationships::following_id.eq(following_profile.0))
+                                .count()
+                                .get_result::<i64>(&mut conn)
+                                .await {
+                                Ok(count) => count > 0,
+                                Err(e) => {
+                                    error!("Failed to check existing relationship: {}", e);
+                                    continue;
+                                }
+                            };
+                                
+                            if existing {
+                                info!("Follow relationship already exists between {} and {}", 
+                                    event.follower, event.following);
+                                continue;
+                            }
+                                
+                            // Start a transaction for atomicity
+                            let result = conn.build_transaction()
+                                .run(|mut conn| Box::pin(async move {
+                                    // Insert relationship
+                                    diesel::insert_into(schema::social_graph_relationships::table)
+                                        .values(&relationship)
+                                        .execute(&mut conn)
+                                        .await?;
+                                        
+                                    // Update follower's following count (increment)
+                                    diesel::sql_query(format!(
+                                        "UPDATE profiles SET following_count = following_count + 1 WHERE id = {}", 
+                                        follower_profile.0
+                                    ))
+                                    .execute(&mut conn)
+                                    .await?;
+                                    
+                                    // Update followed's followers count (increment)
+                                    diesel::sql_query(format!(
+                                        "UPDATE profiles SET followers_count = followers_count + 1 WHERE id = {}", 
+                                        following_profile.0
+                                    ))
+                                    .execute(&mut conn)
+                                    .await?;
+                                    
+                                    Result::<_, diesel::result::Error>::Ok(())
+                                }))
+                                .await;
+                                
+                            if let Err(e) = result {
+                                error!("Failed to process follow event transaction: {}", e);
+                            } else {
+                                info!("Processed follow event: {} is now following {}", 
+                                    event.follower, event.following);
                             }
                         }
                     },
-                    t if t.starts_with(MODULE_PREFIX_PLATFORM) && t.ends_with("ProfileJoinedPlatformEvent") => {
-                        if let Ok(event) = parse_event::<ProfileJoinedPlatformEvent>(event) {
-                            if let Err(e) = self.process_profile_joined_platform(&event).await {
-                                error!("Failed to process ProfileJoinedPlatformEvent: {}", e);
+                    
+                    t if t.starts_with(MODULE_PREFIX_SOCIAL_GRAPH) && t.ends_with("UnfollowEvent") => {
+                        info!("Processing social graph UnfollowEvent");
+                        if let Ok(event) = parse_event::<UnfollowEvent>(event) {
+                            // Create a database connection
+                            let mut conn = match self.get_connection().await {
+                                Ok(conn) => conn,
+                                Err(e) => {
+                                    error!("Failed to get database connection: {}", e);
+                                    continue;
+                                }
+                            };
+                            
+                            // Get profile IDs from addresses
+                            let follower_profile = match schema::profiles::table
+                                .filter(schema::profiles::owner_address.eq(&event.follower))
+                                .select((schema::profiles::id, schema::profiles::owner_address))
+                                .first::<(i32, String)>(&mut conn)
+                                .await {
+                                Ok(profile) => profile,
+                                Err(e) => {
+                                    error!("Failed to find follower profile for address {}: {}", event.follower, e);
+                                    continue;
+                                }
+                            };
+                                
+                            let unfollowed_profile = match schema::profiles::table
+                                .filter(schema::profiles::owner_address.eq(&event.unfollowed))
+                                .select((schema::profiles::id, schema::profiles::owner_address))
+                                .first::<(i32, String)>(&mut conn)
+                                .await {
+                                Ok(profile) => profile,
+                                Err(e) => {
+                                    error!("Failed to find unfollowed profile for address {}: {}", event.unfollowed, e);
+                                    continue;
+                                }
+                            };
+                            
+                            // Check if relationship exists
+                            let relationship = match schema::social_graph_relationships::table
+                                .filter(schema::social_graph_relationships::follower_id.eq(follower_profile.0))
+                                .filter(schema::social_graph_relationships::following_id.eq(unfollowed_profile.0))
+                                .select(schema::social_graph_relationships::id)
+                                .first::<i32>(&mut conn)
+                                .await {
+                                Ok(id) => id,
+                                Err(diesel::result::Error::NotFound) => {
+                                    info!("Follow relationship does not exist between {} and {}", 
+                                        event.follower, event.unfollowed);
+                                    continue;
+                                },
+                                Err(e) => {
+                                    error!("Failed to check existing relationship: {}", e);
+                                    continue;
+                                }
+                            };
+                                
+                            // Start a transaction for atomicity
+                            let result = conn.build_transaction()
+                                .run(|mut conn| Box::pin(async move {
+                                    // Delete the relationship
+                                    diesel::delete(schema::social_graph_relationships::table
+                                        .filter(schema::social_graph_relationships::id.eq(relationship)))
+                                        .execute(&mut conn)
+                                        .await?;
+                                        
+                                    // Update follower's following count (decrement)
+                                    diesel::sql_query(format!(
+                                        "UPDATE profiles SET following_count = GREATEST(0, following_count - 1) WHERE id = {}", 
+                                        follower_profile.0
+                                    ))
+                                    .execute(&mut conn)
+                                    .await?;
+                                    
+                                    // Update unfollowed's followers count (decrement)
+                                    diesel::sql_query(format!(
+                                        "UPDATE profiles SET followers_count = GREATEST(0, followers_count - 1) WHERE id = {}", 
+                                        unfollowed_profile.0
+                                    ))
+                                    .execute(&mut conn)
+                                    .await?;
+                                    
+                                    Result::<_, diesel::result::Error>::Ok(())
+                                }))
+                                .await;
+                                
+                            if let Err(e) = result {
+                                error!("Failed to process unfollow event transaction: {}", e);
+                            } else {
+                                info!("Processed unfollow event: {} unfollowed {}", 
+                                    event.follower, event.unfollowed);
+                            }
+                        }
+                    },
+                    
+                    // Platform events
+                    t if t.starts_with(MODULE_PREFIX_PLATFORM) => {
+                        match type_str {
+                            t if t.ends_with("PlatformBlockedProfileEvent") => {
+                                match parse_event::<PlatformBlockedProfileEvent>(event) {
+                                    Ok(event) => self.process_platform_blocked_profile(&event).await?,
+                                    Err(e) => error!("Failed to parse PlatformBlockedProfileEvent: {}", e),
+                                }
+                            }
+                            t if t.ends_with("PlatformUnblockedProfileEvent") => {
+                                match parse_event::<PlatformUnblockedProfileEvent>(event) {
+                                    Ok(event) => self.process_platform_unblocked_profile(&event).await?,
+                                    Err(e) => error!("Failed to parse PlatformUnblockedProfileEvent: {}", e),
+                                }
+                            }
+                            t if t.ends_with("UserJoinedPlatformEvent") => {
+                                match parse_event::<UserJoinedPlatformEvent>(event) {
+                                    Ok(event) => self.process_user_joined_platform(&event).await?,
+                                    Err(e) => error!("Failed to parse UserJoinedPlatformEvent: {}", e),
+                                }
+                            }
+                            t if t.ends_with("UserLeftPlatformEvent") => {
+                                match parse_event::<UserLeftPlatformEvent>(event) {
+                                    Ok(event) => self.process_user_left_platform(&event).await?,
+                                    Err(e) => error!("Failed to parse UserLeftPlatformEvent: {}", e),
+                                }
+                            }
+                            _ => {
+                                debug!("Unhandled platform event type: {}", type_str);
                             }
                         }
                     },
