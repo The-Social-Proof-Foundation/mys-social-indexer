@@ -80,6 +80,7 @@ impl FollowEvent {
             facebook_username: None,
             reddit_username: None,
             github_username: None,
+            block_list_address: None,
         }
     }
     
@@ -110,6 +111,7 @@ impl FollowEvent {
             facebook_username: None,
             reddit_username: None,
             github_username: None,
+            block_list_address: None,
         }
     }
 }
@@ -142,6 +144,7 @@ impl UnfollowEvent {
             facebook_username: None,
             reddit_username: None,
             github_username: None,
+            block_list_address: None,
         }
     }
     
@@ -172,6 +175,7 @@ impl UnfollowEvent {
             facebook_username: None,
             reddit_username: None,
             github_username: None,
+            block_list_address: None,
         }
     }
 }

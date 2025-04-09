@@ -8,7 +8,7 @@ use tracing::{error, info};
 
 use mys_social_indexer::{
     api,
-    blockchain::{BlockchainEventListener, ProfileEventListener, SocialGraphEventHandler, PlatformEventHandler},
+    blockchain::{BlockchainEventListener, ProfileEventListener, SocialGraphEventHandler, PlatformEventHandler, BlockListEventHandler},
     config::Config,
     db,
     set_mysocial_package_address,
@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
     let (profile_tx, profile_rx) = mpsc::channel(100);
     let (social_graph_tx, social_graph_rx) = mpsc::channel(100);
     let (platform_tx, platform_rx) = mpsc::channel(100);
+    let (block_list_tx, block_list_rx) = mpsc::channel(100);
     
     // Create the blockchain event listener
     let blockchain_listener = Arc::new(BlockchainEventListener::new(config.clone(), db_pool.clone()));
@@ -67,6 +68,7 @@ async fn main() -> Result<()> {
     blockchain_listener.register_event_handler(profile_tx).await;
     blockchain_listener.register_event_handler(social_graph_tx).await;
     blockchain_listener.register_event_handler(platform_tx).await;
+    blockchain_listener.register_event_handler(block_list_tx).await;
     
     // Create and start profile event listener
     let mut profile_listener = ProfileEventListener::new(
@@ -89,6 +91,13 @@ async fn main() -> Result<()> {
         "platform-worker".to_string(),
     );
     
+    // Create and start block list event handler
+    let mut block_list_handler = BlockListEventHandler::new(
+        db_pool.clone(),
+        block_list_rx,
+        "block-list-worker".to_string(),
+    );
+    
     let profile_handle = tokio::spawn(async move {
         if let Err(e) = profile_listener.start().await {
             error!("Profile event listener error: {}", e);
@@ -104,6 +113,12 @@ async fn main() -> Result<()> {
     let platform_handle = tokio::spawn(async move {
         if let Err(e) = platform_handler.start().await {
             error!("Platform handler error: {}", e);
+        }
+    });
+    
+    let block_list_handle = tokio::spawn(async move {
+        if let Err(e) = block_list_handler.start().await {
+            error!("Block list handler error: {}", e);
         }
     });
     
@@ -134,6 +149,9 @@ async fn main() -> Result<()> {
         }
         _ = platform_handle => {
             error!("Platform handler terminated unexpectedly");
+        }
+        _ = block_list_handle => {
+            error!("Block list handler terminated unexpectedly");
         }
         _ = blockchain_handle => {
             error!("Blockchain event listener terminated unexpectedly");

@@ -627,18 +627,22 @@ impl PlatformEventHandler {
                     },
                     Err(diesel::result::Error::NotFound) => {
                         // Create new blocked profile relationship
-                        let new_blocked_profile = NewPlatformBlockedProfile {
-                            platform_id: event.platform_id.clone(),
-                            profile_id: event.profile_id.clone(),
-                            blocked_by: event.blocked_by.clone(),
-                            created_at: chrono::DateTime::from_timestamp(now.as_secs() as i64, 0)
-                                .unwrap_or_else(|| chrono::Utc::now())
-                                .naive_utc(),
-                            is_blocked: true,
-                        };
+                        let new_blocked_profile = (
+                            schema::platform_blocked_profiles::platform_id.eq(event.platform_id.clone()),
+                            schema::platform_blocked_profiles::profile_id.eq(event.profile_id.clone()),
+                            schema::platform_blocked_profiles::blocked_by.eq(event.blocked_by.clone()),
+                            schema::platform_blocked_profiles::created_at.eq(
+                                chrono::DateTime::from_timestamp(now.as_secs() as i64, 0)
+                                    .unwrap_or_else(|| chrono::Utc::now())
+                                    .naive_utc()
+                            ),
+                            schema::platform_blocked_profiles::is_blocked.eq(true),
+                            schema::platform_blocked_profiles::unblocked_at.eq::<Option<NaiveDateTime>>(None),
+                            schema::platform_blocked_profiles::unblocked_by.eq::<Option<String>>(None)
+                        );
                         
                         diesel::insert_into(schema::platform_blocked_profiles::table)
-                            .values(&new_blocked_profile)
+                            .values(new_blocked_profile)
                             .execute(&mut conn)
                             .await?;
                         
@@ -724,19 +728,21 @@ impl PlatformEventHandler {
                         warn!("Unblock event for non-existent block relationship: {} on platform {}", event.profile_id, event.platform_id);
                         
                         // Create a historical record of this unblock with is_blocked=false
-                        let new_blocked_profile = NewPlatformBlockedProfile {
-                            platform_id: event.platform_id.clone(),
-                            profile_id: event.profile_id.clone(),
-                            blocked_by: "unknown".to_string(), // We don't know who blocked since we don't have the record
-                            created_at: chrono::DateTime::from_timestamp(now.as_secs() as i64, 0)
-                                .unwrap_or_else(|| chrono::Utc::now())
-                                .naive_utc(),
-                            is_blocked: false, // Already unblocked
-                        };
+                        let created_timestamp = chrono::DateTime::from_timestamp(now.as_secs() as i64, 0)
+                            .unwrap_or_else(|| chrono::Utc::now())
+                            .naive_utc();
+                            
+                        let new_blocked_profile = (
+                            schema::platform_blocked_profiles::platform_id.eq(event.platform_id.clone()),
+                            schema::platform_blocked_profiles::profile_id.eq(event.profile_id.clone()),
+                            schema::platform_blocked_profiles::blocked_by.eq("unknown".to_string()),
+                            schema::platform_blocked_profiles::created_at.eq(created_timestamp),
+                            schema::platform_blocked_profiles::is_blocked.eq(false) // Already unblocked
+                        );
                         
                         // Insert record
                         let inserted_id = diesel::insert_into(schema::platform_blocked_profiles::table)
-                            .values(&new_blocked_profile)
+                            .values(new_blocked_profile)
                             .returning(schema::platform_blocked_profiles::id)
                             .get_result::<i32>(&mut conn)
                             .await?;
@@ -894,6 +900,34 @@ impl PlatformEventHandler {
                     .execute(&mut conn)
                     .await?;
                 
+                // Check if the platform is approved - only approved platforms can be joined
+                let platform_is_approved = schema::platforms::table
+                    .filter(schema::platforms::platform_id.eq(&event.platform_id))
+                    .select(schema::platforms::is_approved)
+                    .first::<bool>(&mut conn)
+                    .await
+                    .unwrap_or(false);
+                
+                if !platform_is_approved {
+                    warn!("Ignoring join event for non-approved platform: {}", event.platform_id);
+                    return Ok(());
+                }
+                
+                // Check if the profile is blocked by the platform
+                let profile_is_blocked = schema::platform_blocked_profiles::table
+                    .filter(schema::platform_blocked_profiles::platform_id.eq(&event.platform_id))
+                    .filter(schema::platform_blocked_profiles::profile_id.eq(&event.profile_id))
+                    .filter(schema::platform_blocked_profiles::is_blocked.eq(true))
+                    .count()
+                    .get_result::<i64>(&mut conn)
+                    .await
+                    .unwrap_or(0) > 0;
+                
+                if profile_is_blocked {
+                    warn!("Ignoring join event for blocked profile: {} in platform {}", event.profile_id, event.platform_id);
+                    return Ok(());
+                }
+                
                 // Check if membership already exists
                 let membership_exists = schema::platform_memberships::table
                     .filter(schema::platform_memberships::platform_id.eq(&event.platform_id))
@@ -909,6 +943,7 @@ impl PlatformEventHandler {
                     let new_membership = NewPlatformMembership {
                         platform_id: event.platform_id.clone(),
                         profile_id: event.profile_id.clone(),
+                        role: "member".to_string(), // Default role for new members
                         joined_at: chrono::DateTime::from_timestamp(event.timestamp as i64, 0)
                             .unwrap_or_else(|| chrono::Utc::now())
                             .naive_utc(),
@@ -922,6 +957,29 @@ impl PlatformEventHandler {
                         .await?;
                     
                     info!("Created new platform membership: {} -> {}", event.profile_id, event.platform_id);
+                    
+                    // Also create a profile event for this action to track in profile history
+                    let platform_join_event = crate::events::profile_event_types::PlatformJoinedEvent {
+                        profile_id: event.profile_id.clone(),
+                        platform_id: event.platform_id.clone(),
+                        timestamp: event.timestamp,
+                    };
+                    
+                    // We need to get the event ID again since it was moved in the platform_event
+                    let event_id_for_profile = blockchain_event.map(|e| e.event_id.clone());
+                    
+                    let profile_event = crate::models::profile_events::NewProfileEvent::from_platform_joined(
+                        &platform_join_event,
+                        event_id_for_profile
+                    );
+                    
+                    // Insert into profile events table
+                    diesel::insert_into(schema::profile_events::table)
+                        .values(&profile_event)
+                        .execute(&mut conn)
+                        .await?;
+                    
+                    info!("Created profile event for platform join: {} -> {}", event.profile_id, event.platform_id);
                 }
                 
                 Result::<_, diesel::result::Error>::Ok(())
@@ -992,6 +1050,29 @@ impl PlatformEventHandler {
                         .await?;
                     
                     info!("Updated platform membership: {} -> {}", event.profile_id, event.platform_id);
+                    
+                    // Also create a profile event for this action to track in profile history
+                    let platform_left_event = crate::events::profile_event_types::PlatformLeftEvent {
+                        profile_id: event.profile_id.clone(),
+                        platform_id: event.platform_id.clone(),
+                        timestamp: event.timestamp,
+                    };
+                    
+                    // We need to get the event ID again since it was moved in the platform_event
+                    let event_id_for_profile = blockchain_event.map(|e| e.event_id.clone());
+                    
+                    let profile_event = crate::models::profile_events::NewProfileEvent::from_platform_left(
+                        &platform_left_event,
+                        event_id_for_profile
+                    );
+                    
+                    // Insert into profile events table
+                    diesel::insert_into(schema::profile_events::table)
+                        .values(&profile_event)
+                        .execute(&mut conn)
+                        .await?;
+                    
+                    info!("Created profile event for platform leave: {} -> {}", event.profile_id, event.platform_id);
                 }
                 
                 Result::<_, diesel::result::Error>::Ok(())
@@ -1006,6 +1087,13 @@ impl PlatformEventHandler {
     /// Process raw blockchain events
     async fn process_event(&self, event: BlockchainEvent) -> Result<()> {
         debug!("Platform handler examining event: {}", event.event_type);
+        
+        // Skip BlockProfileEvents - let them be handled by the profile handler
+        if event.event_type.contains("BlockProfileEvent") {
+            info!("🚨 Platform handler skipping BlockProfileEvent: {}", event.event_type);
+            info!("🚨 Event data: {}", serde_json::to_string_pretty(&event.data).unwrap_or_default());
+            return Ok(());
+        }
         
         // Log the raw event data for debugging
         info!("Platform handler received event: {}", event.event_type);

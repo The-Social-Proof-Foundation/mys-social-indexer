@@ -4,7 +4,7 @@
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
-use crate::schema::{platforms, platform_moderators, platform_blocked_profiles, platform_events, platform_memberships, platform_relationships};
+use crate::schema::{platforms, platform_moderators, platform_events, platform_memberships, platform_blocked_profiles};
 
 /// Platform status constants
 pub const PLATFORM_STATUS_DEVELOPMENT: i16 = 0;
@@ -228,9 +228,96 @@ pub struct PlatformCreatedEvent {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PlatformApprovalChangedEvent {
     pub platform_id: String,
+    #[serde(alias = "approved")]
     pub is_approved: bool,
+    #[serde(alias = "changed_by")]
     pub approved_by: String,
+    #[serde(default, deserialize_with = "deserialize_timestamp_optional")]
     pub changed_at: u64,
+}
+
+// Standard deserializer for timestamps that accepts both string and number formats
+// Falls back to current time if parsing fails
+fn deserialize_timestamp<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct TimestampVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for TimestampVisitor {
+        type Value = u64;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a number or string representing a timestamp")
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value)
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            match value.parse::<u64>() {
+                Ok(ts) => Ok(ts),
+                Err(e) => {
+                    // Log the error but don't fail - use current time instead
+                    tracing::warn!("Failed to parse timestamp string '{}': {}. Using current time instead.", value, e);
+                    let current_time = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    Ok(current_time)
+                }
+            }
+        }
+        
+        // Handle null or missing values
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            self.visit_unit()
+        }
+        
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            let current_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            Ok(current_time)
+        }
+    }
+
+    deserializer.deserialize_any(TimestampVisitor)
+}
+
+// Version that handles missing fields or null values
+fn deserialize_timestamp_optional<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Try to deserialize, falling back to current time instead of 0
+    let current_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+        
+    Option::deserialize(deserializer)
+        .map(|opt_val: Option<serde_json::Value>| {
+            match opt_val {
+                Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(current_time),
+                Some(serde_json::Value::String(s)) => s.parse::<u64>().unwrap_or(current_time),
+                _ => current_time
+            }
+        })
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -287,6 +374,7 @@ pub struct UserJoinedPlatformEvent {
     pub profile_id: String,
     pub platform_id: String,
     pub user: String,
+    #[serde(deserialize_with = "deserialize_timestamp")]
     pub timestamp: u64,
 }
 
@@ -295,6 +383,7 @@ pub struct UserLeftPlatformEvent {
     pub profile_id: String,
     pub platform_id: String,
     pub user: String,
+    #[serde(deserialize_with = "deserialize_timestamp")]
     pub timestamp: u64,
 }
 
@@ -303,34 +392,10 @@ pub struct UserLeftPlatformEvent {
 pub struct NewPlatformMembership {
     pub platform_id: String,
     pub profile_id: String,
+    pub role: String,
     pub joined_at: NaiveDateTime,
     pub left_at: Option<NaiveDateTime>,
 }
 
-/// Platform relationship model
-#[derive(Debug, Queryable, Selectable, Serialize, Deserialize)]
-#[diesel(table_name = platform_relationships)]
-pub struct PlatformRelationship {
-    pub id: i32,
-    pub platform_id: String,
-    pub profile_id: String,
-    pub joined_at: NaiveDateTime,
-    pub left_at: Option<NaiveDateTime>,
-}
-
-/// DTO for inserting a new platform relationship
-#[derive(Debug, Insertable, Serialize, Deserialize)]
-#[diesel(table_name = platform_relationships)]
-pub struct NewPlatformRelationship {
-    pub platform_id: String,
-    pub profile_id: String,
-    pub joined_at: NaiveDateTime,
-    pub left_at: Option<NaiveDateTime>,
-}
-
-/// DTO for updating a platform relationship
-#[derive(Debug, AsChangeset, Serialize, Deserialize)]
-#[diesel(table_name = platform_relationships)]
-pub struct UpdatePlatformRelationship {
-    pub left_at: Option<NaiveDateTime>,
-}
+// Note: PlatformRelationship, NewPlatformRelationship, and UpdatePlatformRelationship 
+// have been removed in favor of using platform_memberships table

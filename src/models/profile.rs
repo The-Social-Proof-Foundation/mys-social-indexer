@@ -41,6 +41,8 @@ pub struct Profile {
     pub facebook_username: Option<String>,
     pub reddit_username: Option<String>,
     pub github_username: Option<String>,
+    // BlockList object address
+    pub block_list_address: Option<String>,
 }
 
 #[derive(Debug, Insertable, Serialize, Deserialize)]
@@ -79,6 +81,8 @@ pub struct NewProfile {
     pub facebook_username: Option<String>,
     pub reddit_username: Option<String>,
     pub github_username: Option<String>,
+    // BlockList object address
+    pub block_list_address: Option<String>,
 }
 
 #[derive(Debug, AsChangeset, Serialize, Deserialize)]
@@ -110,4 +114,6 @@ pub struct UpdateProfile {
     pub facebook_username: Option<String>,
     pub reddit_username: Option<String>,
     pub github_username: Option<String>,
+    // BlockList object address
+    pub block_list_address: Option<String>,
 }

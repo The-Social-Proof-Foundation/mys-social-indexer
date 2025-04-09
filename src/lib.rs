@@ -15,12 +15,13 @@ use once_cell::sync::OnceCell;
 static MYSOCIAL_PACKAGE_ADDRESS: OnceCell<String> = OnceCell::new();
 
 /// Default MySocial package address if not set via environment
-pub const DEFAULT_MYSOCIAL_PACKAGE_ADDRESS: &str = "0xafb4d47301b3abd7174303822ac41e1853399738ed70fcb7a631486b152dc696";
+pub const DEFAULT_MYSOCIAL_PACKAGE_ADDRESS: &str = "0x81ca1fc04d4e809ad7c293100ad4f514b18a149372549c2f76eaa88d60ec6a10";
 
 /// Module names within the MySocial package
 pub const PROFILE_MODULE_NAME: &str = "profile";
 pub const PLATFORM_MODULE_NAME: &str = "platform";
 pub const SOCIAL_GRAPH_MODULE_NAME: &str = "social_graph";
+pub const BLOCK_LIST_MODULE_NAME: &str = "block_list";
 
 /// Common struct names
 pub const PROFILE_STRUCT_NAME: &str = "Profile";

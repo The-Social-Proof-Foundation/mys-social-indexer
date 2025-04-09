@@ -920,17 +920,21 @@ impl SocialIndexerWorker {
         let mut conn = self.get_connection().await?;
         let now = Utc::now().naive_utc();
         
-        // Create new platform relationship record
-        let new_relationship = NewPlatformRelationship {
-            platform_id: event.platform_id.clone(),
+        // Create a profile event for platform join
+        let platform_join_event = crate::events::profile_event_types::PlatformJoinedEvent {
             profile_id: event.profile_id.clone(),
-            joined_at: now,
-            left_at: None,
+            platform_id: event.platform_id.clone(),
+            timestamp: Utc::now().timestamp() as u64,
         };
         
-        // Insert the platform relationship record
-        diesel::insert_into(schema::platform_relationships::table)
-            .values(&new_relationship)
+        let profile_event = crate::models::profile_events::NewProfileEvent::from_platform_joined(
+            &platform_join_event,
+            None // No blockchain event ID
+        );
+        
+        // Insert the profile event record
+        diesel::insert_into(schema::profile_events::table)
+            .values(&profile_event)
             .execute(&mut conn)
             .await?;
             
@@ -944,16 +948,21 @@ impl SocialIndexerWorker {
         let mut conn = self.get_connection().await?;
         let now = Utc::now().naive_utc();
         
-        // Update the platform relationship record to set left_at
-        let update = UpdatePlatformRelationship {
-            left_at: Some(now),
+        // Create a profile event for platform leave
+        let platform_left_event = crate::events::profile_event_types::PlatformLeftEvent {
+            profile_id: event.profile_id.clone(),
+            platform_id: event.platform_id.clone(),
+            timestamp: Utc::now().timestamp() as u64,
         };
         
-        diesel::update(schema::platform_relationships::table)
-            .filter(schema::platform_relationships::platform_id.eq(&event.platform_id))
-            .filter(schema::platform_relationships::profile_id.eq(&event.profile_id))
-            .filter(schema::platform_relationships::left_at.is_null())
-            .set(&update)
+        let profile_event = crate::models::profile_events::NewProfileEvent::from_platform_left(
+            &platform_left_event,
+            None // No blockchain event ID
+        );
+        
+        // Insert the profile event record
+        diesel::insert_into(schema::profile_events::table)
+            .values(&profile_event)
             .execute(&mut conn)
             .await?;
             
@@ -977,8 +986,9 @@ impl Worker for SocialIndexerWorker {
             for event in &transaction.events {
                 let type_str = &event.type_;
                 
-                // Log all events for debugging
-                info!("Processing event of type: {}", type_str);
+                // Log all events for debugging with the EXACT type string
+                info!("🚨 WORKER: Processing event of type: {}", type_str);
+                info!("📊 WORKER: Raw event data: {}", serde_json::to_string_pretty(event).unwrap_or_default());
                 
                 // Process events by module
                 match type_str {
@@ -1319,6 +1329,125 @@ impl Worker for SocialIndexerWorker {
                     },
                     
                     // Block list events
+                    t if t.starts_with(MODULE_PREFIX_BLOCK_LIST) && t.ends_with("BlockListCreatedEvent") => {
+                        info!("Found a BlockListCreatedEvent: {}", serde_json::to_string_pretty(event).unwrap_or_default());
+                        match parse_event::<BlockListCreatedEvent>(event) {
+                            Ok(evt) => {
+                                let mut conn = match self.get_connection().await {
+                                    Ok(conn) => conn,
+                                    Err(e) => {
+                                        error!("Failed to get database connection: {}", e);
+                                        continue;
+                                    }
+                                };
+                                
+                                if let Err(e) = crate::events::blocking_events::process_block_list_created_event(&mut conn, event).await {
+                                    error!("Failed to process BlockListCreatedEvent: {}", e);
+                                }
+                            },
+                            Err(e) => {
+                                error!("Failed to parse BlockListCreatedEvent: {}", e);
+                                // Log the raw event for debugging
+                                error!("Raw event data: {}", serde_json::to_string_pretty(event).unwrap_or_default());
+                            }
+                        }
+                    },
+                    t if t.contains("UserBlockProfileEvent") => {
+                        info!("🎯 DIRECT HIT: Found a UserBlockProfileEvent: {}", type_str);
+                        info!("🎯 FULL EVENT: {}", serde_json::to_string_pretty(event).unwrap_or_default());
+                        
+                        let mut conn = match self.get_connection().await {
+                            Ok(conn) => conn,
+                            Err(e) => {
+                                error!("Failed to get database connection: {}", e);
+                                continue;
+                            }
+                        };
+                        
+                        // Always try to process the event directly
+                        info!("🔄 Directly processing block profile event");
+                        if let Err(e) = crate::events::blocking_events::process_profile_block_event(&mut conn, event).await {
+                            error!("❌ Failed to process UserBlockProfileEvent: {}", e);
+                            
+                            // Print helpful debugging info
+                            error!("💡 DEBUG INFO:");
+                            error!("   - Event type: {}", type_str);
+                            error!("   - Expected module prefix: {}", MODULE_PREFIX_BLOCK_LIST);
+                            error!("   - Event contains 'UserBlockProfileEvent': {}", type_str.contains("UserBlockProfileEvent"));
+                            error!("   - Event starts with module prefix: {}", type_str.starts_with(MODULE_PREFIX_BLOCK_LIST));
+                        } else {
+                            info!("✅ Successfully processed UserBlockProfileEvent");
+                        }
+                    },
+                    // Keep original handler for backward compatibility
+                    t if t.contains("BlockProfileEvent") => {
+                        info!("🎯 LEGACY EVENT: Found a BlockProfileEvent: {}", type_str);
+                        info!("🎯 FULL EVENT: {}", serde_json::to_string_pretty(event).unwrap_or_default());
+                        
+                        let mut conn = match self.get_connection().await {
+                            Ok(conn) => conn,
+                            Err(e) => {
+                                error!("Failed to get database connection: {}", e);
+                                continue;
+                            }
+                        };
+                        
+                        // Process using the same handler
+                        info!("🔄 Processing legacy block profile event");
+                        if let Err(e) = crate::events::blocking_events::process_profile_block_event(&mut conn, event).await {
+                            error!("❌ Failed to process legacy BlockProfileEvent: {}", e);
+                        } else {
+                            info!("✅ Successfully processed legacy BlockProfileEvent");
+                        }
+                    },
+                    t if t.contains("UserUnblockProfileEvent") => {
+                        info!("🎯 DIRECT HIT: Found a UserUnblockProfileEvent: {}", type_str);
+                        info!("🎯 FULL EVENT: {}", serde_json::to_string_pretty(event).unwrap_or_default());
+                        
+                        let mut conn = match self.get_connection().await {
+                            Ok(conn) => conn,
+                            Err(e) => {
+                                error!("Failed to get database connection: {}", e);
+                                continue;
+                            }
+                        };
+                        
+                        // Always try to process the event directly
+                        info!("🔄 Directly processing profile unblock event");
+                        if let Err(e) = crate::events::blocking_events::process_profile_unblock_event(&mut conn, event).await {
+                            error!("❌ Failed to process UserUnblockProfileEvent: {}", e);
+                            
+                            // Print helpful debugging info
+                            error!("💡 DEBUG INFO:");
+                            error!("   - Event type: {}", type_str);
+                            error!("   - Expected module prefix: {}", MODULE_PREFIX_BLOCK_LIST);
+                            error!("   - Event contains 'UserUnblockProfileEvent': {}", type_str.contains("UserUnblockProfileEvent"));
+                            error!("   - Event starts with module prefix: {}", type_str.starts_with(MODULE_PREFIX_BLOCK_LIST));
+                        } else {
+                            info!("✅ Successfully processed UserUnblockProfileEvent");
+                        }
+                    },
+                    // Keep original handler for backward compatibility
+                    t if t.contains("UnblockProfileEvent") => {
+                        info!("🎯 LEGACY EVENT: Found an UnblockProfileEvent: {}", type_str);
+                        info!("🎯 FULL EVENT: {}", serde_json::to_string_pretty(event).unwrap_or_default());
+                        
+                        let mut conn = match self.get_connection().await {
+                            Ok(conn) => conn,
+                            Err(e) => {
+                                error!("Failed to get database connection: {}", e);
+                                continue;
+                            }
+                        };
+                        
+                        // Process using the same handler
+                        info!("🔄 Processing legacy unblock profile event");
+                        if let Err(e) = crate::events::blocking_events::process_profile_unblock_event(&mut conn, event).await {
+                            error!("❌ Failed to process legacy UnblockProfileEvent: {}", e);
+                        } else {
+                            info!("✅ Successfully processed legacy UnblockProfileEvent");
+                        }
+                    },
                     t if t.starts_with(MODULE_PREFIX_BLOCK_LIST) && t.ends_with("EntityBlockedEvent") => {
                         if let Ok(event) = parse_event::<EntityBlockedEvent>(event) {
                             if let Err(e) = self.process_entity_blocked(&event).await {

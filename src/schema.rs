@@ -41,6 +41,8 @@ table! {
         facebook_username -> Nullable<Text>,
         reddit_username -> Nullable<Text>,
         github_username -> Nullable<Text>,
+        // Block list address
+        block_list_address -> Nullable<Varchar>,
     }
 }
 
@@ -150,19 +152,36 @@ table! {
         id -> Integer,
         platform_id -> Varchar,
         profile_id -> Varchar,
+        role -> Varchar,
         joined_at -> Timestamp,
         left_at -> Nullable<Timestamp>,
     }
 }
 
-// Define platform_relationships table
+// Note: platform_relationships table has been removed in favor of platform_memberships
+
+// Profile blocking table
 table! {
-    platform_relationships (id) {
+    profiles_blocked (id) {
         id -> Integer,
-        platform_id -> Varchar,
+        blocker_profile_id -> Varchar,
+        blocked_profile_id -> Varchar,
+        created_at -> Timestamp,
+        is_blocked -> Bool,
+        unblocked_at -> Nullable<Timestamp>,
+    }
+}
+
+// Profile events table
+table! {
+    profile_events (id) {
+        id -> Integer,
+        event_type -> Varchar,
         profile_id -> Varchar,
-        joined_at -> Timestamp,
-        left_at -> Nullable<Timestamp>,
+        event_data -> Jsonb,
+        event_id -> Nullable<Varchar>,
+        created_at -> Timestamp,
+        updated_at -> Timestamp,
     }
 }
 
@@ -177,5 +196,6 @@ allow_tables_to_appear_in_same_query!(
     platform_blocked_profiles,
     platform_events,
     platform_memberships,
-    platform_relationships,
+    profiles_blocked,
+    profile_events,
 );

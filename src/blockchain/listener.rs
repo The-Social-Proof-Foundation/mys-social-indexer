@@ -57,6 +57,30 @@ impl BlockchainEventListener {
 
     /// Process a blockchain event and forward it to all registered handlers
     async fn process_event(&self, event: BlockchainEvent) {
+        // SUPER IMPORTANT: Log every single event type that comes through the system
+        // This will help us identify if events are being received at all
+        tracing::info!("🔍 GLOBAL EVENT TRACKER: Received event type: {}", event.event_type);
+        
+        // Specifically log any event that might be related to blocking
+        if event.event_type.contains("block_list") || 
+           event.event_type.contains("BlockProfile") || 
+           event.event_type.contains("BlockList") || 
+           event.event_type.contains("Unblock") || 
+           event.event_type.contains("blocker") || 
+           event.event_type.contains("blocked") {
+            tracing::info!("🚨 POTENTIAL BLOCK EVENT FOUND: {}", event.event_type);
+            tracing::info!("🚨 EVENT DATA: {}", serde_json::to_string_pretty(&event.data).unwrap_or_default());
+            
+            // Check for module_name field in event data for more reliable detection
+            if let Some(obj) = event.data.as_object() {
+                if let Some(fields) = obj.get("fields").and_then(|f| f.as_object()) {
+                    if let Some(module_name) = fields.get("module_name") {
+                        tracing::info!("🔍 Event has module_name field: {}", module_name);
+                    }
+                }
+            }
+        }
+        
         let senders = self.event_senders.lock().await;
         for sender in senders.iter() {
             if let Err(e) = sender.send(event.clone()).await {
@@ -121,7 +145,9 @@ impl BlockchainEventListener {
                        event.type_.to_string().contains("::FollowEvent") ||
                        event.type_.to_string().contains("::UnfollowEvent") ||
                        event.type_.to_string().contains("::platform::") ||
-                       event.type_.to_string().contains("::Platform") {
+                       event.type_.to_string().contains("::Platform") ||
+                       event.type_.to_string().contains("::block_list::") ||
+                       event.type_.to_string().contains("BlockProfileEvent") {
                         tracing::info!("SOCIAL/PLATFORM EVENT DETECTED - Analyzing structure...");
                         
                         // Log the event type
@@ -257,6 +283,12 @@ impl BlockchainEventListener {
                         
                         // Get the parsed JSON data
                         let parsed_data = event.parsed_json.clone();
+                        
+                        // Debug log for block profile events
+                        if event.type_.to_string().contains("BlockProfileEvent") {
+                            tracing::info!("!!! CRITICAL DEBUG: FOUND BlockProfileEvent in RAW STREAM: {}", event.type_);
+                            tracing::info!("!!! CRITICAL DEBUG: BlockProfileEvent DATA: {}", serde_json::to_string_pretty(&parsed_data).unwrap_or_default());
+                        }
                         
                         // Generate the event ID in format <digest>:<event_seq>
                         let event_id = format!("{}:{}", event.id.tx_digest, event.id.event_seq);

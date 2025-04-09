@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod profile_events;
+pub mod profile_event_types;
 pub mod social_graph_events;
 pub mod platform_events;
+pub mod blocking_events;
 
 // Re-export all profile events
 pub use profile_events::{
@@ -15,6 +17,15 @@ pub use profile_events::{
     ProfileJoinedPlatformEvent,
 };
 
+// Re-export profile event types
+pub use profile_event_types::{
+    ProfileEventType,
+    BlockAddedEvent,
+    BlockRemovedEvent,
+    PlatformJoinedEvent,
+    PlatformLeftEvent,
+};
+
 // Re-export platform events
 pub use crate::models::platform::{
     PlatformCreatedEvent,
@@ -22,8 +33,9 @@ pub use crate::models::platform::{
     PlatformApprovalChangedEvent,
     ModeratorAddedEvent,
     ModeratorRemovedEvent,
-    PlatformBlockedProfileEvent,
-    PlatformUnblockedProfileEvent,
+    // These are also defined in blocking models, so use those instead
+    // PlatformBlockedProfileEvent,
+    // PlatformUnblockedProfileEvent,
 };
 
 // Re-export social graph events
@@ -31,6 +43,19 @@ pub use social_graph_events::{
     FollowEvent,
     UnfollowEvent,
 };
+
+// Re-export blocking events
+pub use crate::models::blocking::{
+    // Block events
+    UserBlockEvent,
+    UserUnblockEvent,
+    // Platform events
+    PlatformBlockedProfileEvent,
+    PlatformUnblockedProfileEvent,
+};
+
+// BlockListCreatedEvent
+pub use crate::events::blocking_events::BlockListCreatedEvent;
 
 // Define placeholder event types for other modules
 // These should be moved to their own module files when implemented

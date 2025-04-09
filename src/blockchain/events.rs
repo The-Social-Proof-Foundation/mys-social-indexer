@@ -11,6 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::db::{Database, DbConnection};
 use crate::events::profile_events::ProfileCreatedEvent;
+use crate::events::blocking_events;
 use crate::models::indexer::NewIndexerProgress;
 use crate::schema;
 
@@ -262,7 +263,19 @@ impl ProfileEventListener {
         info!("Processed profile created: {}", event.profile_id);
         Ok(())
     }
-    
+
+    /// Process platform block event
+    async fn process_platform_block_event(&self, event_data: &serde_json::Value) -> Result<()> {
+        let mut conn = self.get_connection().await?;
+        blocking_events::process_platform_block_event(&mut conn, event_data).await
+    }
+
+    /// Process platform unblock event
+    async fn process_platform_unblock_event(&self, event_data: &serde_json::Value) -> Result<()> {
+        let mut conn = self.get_connection().await?;
+        blocking_events::process_platform_unblock_event(&mut conn, event_data).await
+    }
+
     /// Start listening for profile events
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting profile event listener");
@@ -299,6 +312,314 @@ impl ProfileEventListener {
                     }
                 }
                 // Add other profile event types as needed
+                
+                // Update progress after processing the event
+                if let Err(e) = self.update_progress(event.timestamp_ms).await {
+                    error!("Failed to update progress: {}", e);
+                }
+            }
+            // Handle platform blocking events
+            else if event.event_type.ends_with("::PlatformBlockedProfileEvent") {
+                info!("Processing platform block event: {}", event.event_type);
+                if let Err(e) = self.process_platform_block_event(&event.data).await {
+                    error!("Failed to process platform block event: {}", e);
+                }
+                
+                // Update progress after processing the event
+                if let Err(e) = self.update_progress(event.timestamp_ms).await {
+                    error!("Failed to update progress: {}", e);
+                }
+            }
+            // Handle platform unblocking events
+            else if event.event_type.ends_with("::PlatformUnblockedProfileEvent") {
+                info!("Processing platform unblock event: {}", event.event_type);
+                if let Err(e) = self.process_platform_unblock_event(&event.data).await {
+                    error!("Failed to process platform unblock event: {}", e);
+                }
+                
+                // Update progress after processing the event
+                if let Err(e) = self.update_progress(event.timestamp_ms).await {
+                    error!("Failed to update progress: {}", e);
+                }
+            }
+            // Handle profile blocking events from block_list module
+            else if event.event_type.ends_with("::UserBlockEvent") {
+                info!("⚠️ DETECTED USER BLOCK EVENT: {}", event.event_type);
+                info!("⚠️ EVENT DATA: {}", serde_json::to_string_pretty(&event.data).unwrap_or_default());
+                
+                // Try to extract information from any possible structure
+                let blocker_value = if let Some(obj) = event.data.as_object() {
+                    // Try fields.blocker
+                    if let Some(fields) = obj.get("fields").and_then(|f| f.as_object()) {
+                        if let Some(blocker) = fields.get("blocker").and_then(|v| v.as_str()) {
+                            info!("📌 Found blocker in fields.blocker: {}", blocker);
+                            blocker
+                        } else if let Some(blocker) = obj.get("blocker").and_then(|v| v.as_str()) {
+                            info!("📌 Found blocker at root level: {}", blocker);
+                            blocker
+                        } else {
+                            info!("❌ Could not find blocker in standard locations");
+                            "unknown"
+                        }
+                    } else if let Some(blocker) = obj.get("blocker").and_then(|v| v.as_str()) {
+                        info!("📌 Found blocker at root level: {}", blocker);
+                        blocker
+                    } else {
+                        info!("❌ Could not find blocker in any location");
+                        "unknown"
+                    }
+                } else {
+                    info!("❌ Event data is not an object");
+                    "unknown"
+                };
+                
+                let blocked_value = if let Some(obj) = event.data.as_object() {
+                    // Try fields.blocked
+                    if let Some(fields) = obj.get("fields").and_then(|f| f.as_object()) {
+                        if let Some(blocked) = fields.get("blocked").and_then(|v| v.as_str()) {
+                            info!("📌 Found blocked in fields.blocked: {}", blocked);
+                            blocked
+                        } else if let Some(blocked) = obj.get("blocked").and_then(|v| v.as_str()) {
+                            info!("📌 Found blocked at root level: {}", blocked);
+                            blocked
+                        } else {
+                            info!("❌ Could not find blocked in standard locations");
+                            "unknown"
+                        }
+                    } else if let Some(blocked) = obj.get("blocked").and_then(|v| v.as_str()) {
+                        info!("📌 Found blocked at root level: {}", blocked);
+                        blocked
+                    } else {
+                        info!("❌ Could not find blocked in any location");
+                        "unknown"
+                    }
+                } else {
+                    info!("❌ Event data is not an object");
+                    "unknown"
+                };
+                
+                // Check for the new module_name field
+                let module_name = if let Some(obj) = event.data.as_object() {
+                    if let Some(fields) = obj.get("fields").and_then(|f| f.as_object()) {
+                        if let Some(module) = fields.get("module_name").and_then(|v| v.as_str()) {
+                            info!("📌 Found module_name in fields.module_name: {}", module);
+                            Some(module.to_string())
+                        } else {
+                            info!("❌ Could not find module_name in fields");
+                            None
+                        }
+                    } else {
+                        info!("❌ Could not find fields container");
+                        None
+                    }
+                } else {
+                    info!("❌ Event data is not an object");
+                    None
+                };
+                
+                info!("🔵 BLOCK EVENT SUMMARY: blocker={}, blocked={}, module={:?}", 
+                    blocker_value, blocked_value, module_name);
+                
+                info!("------------------------------------------------------------------------------");
+                info!("DETECTED BLOCK PROFILE EVENT: {}", event.event_type);
+                info!("------------------------------------------------------------------------------");
+                
+                let mut conn = self.get_connection().await?;
+                
+                // Log extensive database connection info
+                info!("Verifying database connection and schema...");
+                
+                // Check database version
+                let db_verification = diesel::dsl::select(diesel::dsl::sql::<diesel::sql_types::Text>("version()"))
+                    .get_result::<String>(&mut conn)
+                    .await;
+                
+                match db_verification {
+                    Ok(ver) => info!("Connected to database: {}", ver),
+                    Err(e) => error!("Failed to verify database connection: {}", e),
+                }
+                
+                // Check if profiles_blocked table exists
+                let table_check = diesel::dsl::select(
+                    diesel::dsl::sql::<diesel::sql_types::Bool>(
+                        "EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'profiles_blocked')"
+                    )
+                )
+                .get_result::<bool>(&mut conn)
+                .await;
+                
+                match table_check {
+                    Ok(exists) => {
+                        if exists {
+                            info!("✅ 'profiles_blocked' table exists in the database");
+                            
+                            // Use a more compatible approach to check the table schema
+                            let col_count = diesel::dsl::select(
+                                diesel::dsl::sql::<diesel::sql_types::BigInt>(
+                                    "COUNT(*) FROM information_schema.columns WHERE table_name = 'profiles_blocked'"
+                                )
+                            )
+                            .get_result::<i64>(&mut conn)
+                            .await;
+                            
+                            match col_count {
+                                Ok(count) => {
+                                    info!("'profiles_blocked' table has {} columns", count);
+                                    
+                                    // Check if we have our required columns
+                                    let required_cols = diesel::dsl::select(
+                                        diesel::dsl::sql::<diesel::sql_types::Bool>(
+                                            "EXISTS (SELECT 1 FROM information_schema.columns 
+                                             WHERE table_name = 'profiles_blocked' 
+                                             AND column_name = 'blocker_profile_id')"
+                                        )
+                                    )
+                                    .get_result::<bool>(&mut conn)
+                                    .await;
+                                    
+                                    match required_cols {
+                                        Ok(has_cols) => {
+                                            if has_cols {
+                                                info!("✅ Required columns exist in profiles_blocked table");
+                                            } else {
+                                                error!("❌ Required column 'blocker_profile_id' not found in profiles_blocked table");
+                                            }
+                                        },
+                                        Err(e) => error!("Failed to check for required columns: {}", e),
+                                    }
+                                    
+                                    // Count existing records
+                                    let record_count = diesel::dsl::select(
+                                        diesel::dsl::sql::<diesel::sql_types::BigInt>(
+                                            "COUNT(*) FROM profiles_blocked"
+                                        )
+                                    )
+                                    .get_result::<i64>(&mut conn)
+                                    .await;
+                                    
+                                    match record_count {
+                                        Ok(count) => info!("Current records in profiles_blocked: {}", count),
+                                        Err(e) => error!("Failed to count records: {}", e),
+                                    }
+                                },
+                                Err(e) => error!("Failed to check table structure: {}", e),
+                            }
+                        } else {
+                            error!("❌ 'profiles_blocked' table DOES NOT exist in the database!");
+                            
+                            // List some available tables
+                            let table_count = diesel::dsl::select(
+                                diesel::dsl::sql::<diesel::sql_types::BigInt>(
+                                    "COUNT(*) FROM information_schema.tables WHERE table_schema = 'public'"
+                                )
+                            )
+                            .get_result::<i64>(&mut conn)
+                            .await;
+                            
+                            match table_count {
+                                Ok(count) => info!("Found {} tables in the database", count),
+                                Err(e) => error!("Failed to count tables: {}", e),
+                            }
+                        }
+                    },
+                    Err(e) => error!("Failed to check if table exists: {}", e),
+                }
+                
+                // Log the raw event data to debug JSON structure with full details
+                let pretty_json = serde_json::to_string_pretty(&event.data).unwrap_or_default();
+                info!("BLOCK EVENT RAW DATA:\n{}", pretty_json);
+                
+                // Try to process the event
+                match blocking_events::process_profile_block_event(&mut conn, &event.data).await {
+                    Ok(_) => {
+                        info!("✅ Successfully processed profile block event");
+                        
+                        // Verify the database entry was created
+                        use diesel::prelude::*;
+                        use diesel_async::RunQueryDsl;
+                        use crate::schema::profiles_blocked::dsl::*;
+                        
+                        // Extract blocker and blocked from the event data
+                        let blocker_value = if let Some(obj) = event.data.as_object() {
+                            if let Some(fields) = obj.get("fields").and_then(|f| f.as_object()) {
+                                fields.get("blocker").and_then(|v| v.as_str()).unwrap_or_default()
+                            } else {
+                                obj.get("blocker").and_then(|v| v.as_str()).unwrap_or_default()
+                            }
+                        } else {
+                            ""
+                        };
+                        
+                        let blocked_value = if let Some(obj) = event.data.as_object() {
+                            if let Some(fields) = obj.get("fields").and_then(|f| f.as_object()) {
+                                fields.get("blocked").and_then(|v| v.as_str()).unwrap_or_default()
+                            } else {
+                                obj.get("blocked").and_then(|v| v.as_str()).unwrap_or_default()
+                            }
+                        } else {
+                            ""
+                        };
+                        
+                        if !blocker_value.is_empty() && !blocked_value.is_empty() {
+                            let query = profiles_blocked
+                                .filter(blocker_profile_id.eq(blocker_value))
+                                .filter(blocked_profile_id.eq(blocked_value))
+                                .select(id);
+                                
+                            info!("Executing verification query for blocker={}, blocked={}", 
+                                blocker_value, blocked_value);
+                                
+                            // Use count to see if any records exist
+                            let count_result = query.count().get_result::<i64>(&mut conn).await;
+                            
+                            match count_result {
+                                Ok(count) => {
+                                    if count > 0 {
+                                        info!("✅ Verified database entry exists - found {} records", count);
+                                    } else {
+                                        error!("❌ No database entries found for this block relationship");
+                                    }
+                                },
+                                Err(e) => error!("❌ Failed to verify database entry: {}", e),
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        error!("❌ Failed to process profile block event: {}", e);
+                    }
+                }
+                
+                // Update progress after processing the event
+                if let Err(e) = self.update_progress(event.timestamp_ms).await {
+                    error!("Failed to update progress: {}", e);
+                }
+            }
+            // Handle profile unblocking events - only match UserUnblockEvent
+            else if event.event_type.ends_with("::UserUnblockEvent") {
+                info!("Processing profile unblock event: {}", event.event_type);
+                let mut conn = self.get_connection().await?;
+                
+                // Log the raw event data to debug JSON structure
+                info!("Raw unblock event data: {}", serde_json::to_string_pretty(&event.data).unwrap_or_default());
+                
+                if let Err(e) = blocking_events::process_profile_unblock_event(&mut conn, &event.data).await {
+                    error!("Failed to process profile unblock event: {}", e);
+                } else {
+                    info!("Successfully processed profile unblock event");
+                }
+                
+                // Update progress after processing the event
+                if let Err(e) = self.update_progress(event.timestamp_ms).await {
+                    error!("Failed to update progress: {}", e);
+                }
+            }
+            // Handle BlockList creation events
+            else if event.event_type.ends_with("::BlockListCreatedEvent") {
+                info!("Processing block list created event: {}", event.event_type);
+                let mut conn = self.get_connection().await?;
+                if let Err(e) = blocking_events::process_block_list_created_event(&mut conn, &event.data).await {
+                    error!("Failed to process block list created event: {}", e);
+                }
                 
                 // Update progress after processing the event
                 if let Err(e) = self.update_progress(event.timestamp_ms).await {
