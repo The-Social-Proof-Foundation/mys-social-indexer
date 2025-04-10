@@ -5,6 +5,7 @@ use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use mys_data_ingestion_core::Worker;
 use mys_types::full_checkpoint_content::CheckpointData;
+use mys_types::event::{Event as MysEvent, EventID};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -110,17 +111,17 @@ impl SocialIndexerWorker {
                 .await.is_ok();
                 
             if !username_exists {
-                // Convert timestamp to NaiveDateTime
-                let registered_at = DateTime::from_timestamp(event.created_at as i64, 0)
-                    .unwrap_or(Utc::now())
-                    .naive_utc();
+                // Use current time instead of blockchain epoch
+                // Blockchain epoch values are small numbers and not actual Unix timestamps
+                let now = Utc::now().naive_utc();
+                info!("Using current timestamp for username registration: {}", now);
                 
                 // Create a new username record
                 let new_username = NewUsername {
                     profile_id,
                     username: username.clone(),
-                    registered_at,
-                    updated_at: registered_at,
+                    registered_at: now,
+                    updated_at: now,
                 };
                 
                 // Insert the username
@@ -190,15 +191,18 @@ impl SocialIndexerWorker {
         // Create an update model - use existing values when event doesn't provide them
         // Use website field from event if provided, otherwise keep existing
         
+        // Use current time instead of blockchain epoch
+        // Blockchain epoch values are small numbers and not actual Unix timestamps
+        let now = Utc::now().naive_utc();
+        info!("Using current timestamp instead of blockchain epoch: {}", now);
+        
         let update = UpdateProfile {
             display_name: event.display_name.clone(),
             bio: if event.bio.is_some() { event.bio.clone() } else { profile.bio.clone() },
             profile_photo: if event.profile_photo.is_some() { event.profile_photo.clone() } else { profile.profile_photo.clone() },
             website: event.website.clone(),  // Use new website field from event
             cover_photo: if event.cover_photo.is_some() { event.cover_photo.clone() } else { profile.cover_photo.clone() },
-            sensitive_data_updated_at: Some(DateTime::from_timestamp(event.updated_at as i64, 0)
-                .unwrap_or(Utc::now())
-                .naive_utc()),
+            sensitive_data_updated_at: Some(now), // Use current time
             // Include all sensitive fields from the event
             birthdate: event.birthdate.clone(),
             current_location: event.current_location.clone(),
@@ -330,14 +334,9 @@ impl SocialIndexerWorker {
                     .first::<crate::models::username::Username>(&mut conn)
                     .await.is_ok();
                 
-                // Get timestamp from event or create a default one
-                let now = if event.registered_at > 0 {
-                    chrono::DateTime::from_timestamp(event.registered_at as i64, 0)
-                        .unwrap_or(Utc::now())
-                        .naive_utc()
-                } else {
-                    Utc::now().naive_utc()
-                };
+                // Use current time instead of blockchain epoch
+                let now = Utc::now().naive_utc();
+                info!("Using current timestamp for username registration: {}", now);
                     
                 // Only insert if it doesn't exist
                 if !username_exists {
@@ -884,7 +883,6 @@ impl SocialIndexerWorker {
             profile_id: event.profile_id.clone(),
             blocked_by: event.blocked_by.clone(),
             created_at: now,
-            is_blocked: true,
         };
         
         // Insert the blocked profile record
@@ -916,7 +914,7 @@ impl SocialIndexerWorker {
     }
     
     /// Process a user joined platform event
-    async fn process_user_joined_platform(&self, event: &UserJoinedPlatformEvent) -> Result<()> {
+    async fn process_user_joined_platform(&self, event: &UserJoinedPlatformEvent, event_id: Option<String>) -> Result<()> {
         let mut conn = self.get_connection().await?;
         let now = Utc::now().naive_utc();
         
@@ -929,7 +927,7 @@ impl SocialIndexerWorker {
         
         let profile_event = crate::models::profile_events::NewProfileEvent::from_platform_joined(
             &platform_join_event,
-            None // No blockchain event ID
+            event_id
         );
         
         // Insert the profile event record
@@ -944,7 +942,7 @@ impl SocialIndexerWorker {
     }
     
     /// Process a user left platform event
-    async fn process_user_left_platform(&self, event: &UserLeftPlatformEvent) -> Result<()> {
+    async fn process_user_left_platform(&self, event: &UserLeftPlatformEvent, event_id: Option<String>) -> Result<()> {
         let mut conn = self.get_connection().await?;
         let now = Utc::now().naive_utc();
         
@@ -957,7 +955,7 @@ impl SocialIndexerWorker {
         
         let profile_event = crate::models::profile_events::NewProfileEvent::from_platform_left(
             &platform_left_event,
-            None // No blockchain event ID
+            event_id
         );
         
         // Insert the profile event record
@@ -966,6 +964,21 @@ impl SocialIndexerWorker {
             .execute(&mut conn)
             .await?;
             
+        // Delete the platform membership record
+        let deleted_count = diesel::delete(schema::platform_memberships::table)
+            .filter(schema::platform_memberships::platform_id.eq(&event.platform_id))
+            .filter(schema::platform_memberships::profile_id.eq(&event.profile_id))
+            .execute(&mut conn)
+            .await?;
+            
+        if deleted_count > 0 {
+            info!("Deleted platform membership: platform={}, profile={}", 
+                  event.platform_id, event.profile_id);
+        } else {
+            warn!("No platform membership found to delete: platform={}, profile={}", 
+                  event.platform_id, event.profile_id);
+        }
+        
         info!("Processed user left platform: platform={}, profile={}", 
               event.platform_id, event.profile_id);
         Ok(())
@@ -1296,13 +1309,47 @@ impl Worker for SocialIndexerWorker {
                             }
                             t if t.ends_with("UserJoinedPlatformEvent") => {
                                 match parse_event::<UserJoinedPlatformEvent>(event) {
-                                    Ok(event) => self.process_user_joined_platform(&event).await?,
+                                    Ok(parsed_event) => {
+                                        // Extract event ID using EventID - look for appropriate fields
+                                        let event_id = if let Some(tx_digest) = &event.tx_digest {
+                                            // EventID includes both transaction digest and event sequence
+                                            let event_id_struct = EventID {
+                                                tx_digest: tx_digest.clone(),
+                                                event_seq: event.event_num,
+                                            };
+                                            
+                                            // Convert EventID to string representation
+                                            Some(event_id_struct.to_string())
+                                        } else {
+                                            None
+                                        };
+                                        
+                                        info!("Processing UserJoinedPlatformEvent with event_id: {:?}", event_id);
+                                        self.process_user_joined_platform(&parsed_event, event_id).await?
+                                    },
                                     Err(e) => error!("Failed to parse UserJoinedPlatformEvent: {}", e),
                                 }
                             }
                             t if t.ends_with("UserLeftPlatformEvent") => {
                                 match parse_event::<UserLeftPlatformEvent>(event) {
-                                    Ok(event) => self.process_user_left_platform(&event).await?,
+                                    Ok(parsed_event) => {
+                                        // Extract event ID using EventID - look for appropriate fields
+                                        let event_id = if let Some(tx_digest) = &event.tx_digest {
+                                            // EventID includes both transaction digest and event sequence
+                                            let event_id_struct = EventID {
+                                                tx_digest: tx_digest.clone(),
+                                                event_seq: event.event_num,
+                                            };
+                                            
+                                            // Convert EventID to string representation
+                                            Some(event_id_struct.to_string())
+                                        } else {
+                                            None
+                                        };
+                                        
+                                        info!("Processing UserLeftPlatformEvent with event_id: {:?}", event_id);
+                                        self.process_user_left_platform(&parsed_event, event_id).await?
+                                    },
                                     Err(e) => error!("Failed to parse UserLeftPlatformEvent: {}", e),
                                 }
                             }
@@ -1352,102 +1399,8 @@ impl Worker for SocialIndexerWorker {
                             }
                         }
                     },
-                    t if t.contains("UserBlockProfileEvent") => {
-                        info!("🎯 DIRECT HIT: Found a UserBlockProfileEvent: {}", type_str);
-                        info!("🎯 FULL EVENT: {}", serde_json::to_string_pretty(event).unwrap_or_default());
-                        
-                        let mut conn = match self.get_connection().await {
-                            Ok(conn) => conn,
-                            Err(e) => {
-                                error!("Failed to get database connection: {}", e);
-                                continue;
-                            }
-                        };
-                        
-                        // Always try to process the event directly
-                        info!("🔄 Directly processing block profile event");
-                        if let Err(e) = crate::events::blocking_events::process_profile_block_event(&mut conn, event).await {
-                            error!("❌ Failed to process UserBlockProfileEvent: {}", e);
-                            
-                            // Print helpful debugging info
-                            error!("💡 DEBUG INFO:");
-                            error!("   - Event type: {}", type_str);
-                            error!("   - Expected module prefix: {}", MODULE_PREFIX_BLOCK_LIST);
-                            error!("   - Event contains 'UserBlockProfileEvent': {}", type_str.contains("UserBlockProfileEvent"));
-                            error!("   - Event starts with module prefix: {}", type_str.starts_with(MODULE_PREFIX_BLOCK_LIST));
-                        } else {
-                            info!("✅ Successfully processed UserBlockProfileEvent");
-                        }
-                    },
-                    // Keep original handler for backward compatibility
-                    t if t.contains("BlockProfileEvent") => {
-                        info!("🎯 LEGACY EVENT: Found a BlockProfileEvent: {}", type_str);
-                        info!("🎯 FULL EVENT: {}", serde_json::to_string_pretty(event).unwrap_or_default());
-                        
-                        let mut conn = match self.get_connection().await {
-                            Ok(conn) => conn,
-                            Err(e) => {
-                                error!("Failed to get database connection: {}", e);
-                                continue;
-                            }
-                        };
-                        
-                        // Process using the same handler
-                        info!("🔄 Processing legacy block profile event");
-                        if let Err(e) = crate::events::blocking_events::process_profile_block_event(&mut conn, event).await {
-                            error!("❌ Failed to process legacy BlockProfileEvent: {}", e);
-                        } else {
-                            info!("✅ Successfully processed legacy BlockProfileEvent");
-                        }
-                    },
-                    t if t.contains("UserUnblockProfileEvent") => {
-                        info!("🎯 DIRECT HIT: Found a UserUnblockProfileEvent: {}", type_str);
-                        info!("🎯 FULL EVENT: {}", serde_json::to_string_pretty(event).unwrap_or_default());
-                        
-                        let mut conn = match self.get_connection().await {
-                            Ok(conn) => conn,
-                            Err(e) => {
-                                error!("Failed to get database connection: {}", e);
-                                continue;
-                            }
-                        };
-                        
-                        // Always try to process the event directly
-                        info!("🔄 Directly processing profile unblock event");
-                        if let Err(e) = crate::events::blocking_events::process_profile_unblock_event(&mut conn, event).await {
-                            error!("❌ Failed to process UserUnblockProfileEvent: {}", e);
-                            
-                            // Print helpful debugging info
-                            error!("💡 DEBUG INFO:");
-                            error!("   - Event type: {}", type_str);
-                            error!("   - Expected module prefix: {}", MODULE_PREFIX_BLOCK_LIST);
-                            error!("   - Event contains 'UserUnblockProfileEvent': {}", type_str.contains("UserUnblockProfileEvent"));
-                            error!("   - Event starts with module prefix: {}", type_str.starts_with(MODULE_PREFIX_BLOCK_LIST));
-                        } else {
-                            info!("✅ Successfully processed UserUnblockProfileEvent");
-                        }
-                    },
-                    // Keep original handler for backward compatibility
-                    t if t.contains("UnblockProfileEvent") => {
-                        info!("🎯 LEGACY EVENT: Found an UnblockProfileEvent: {}", type_str);
-                        info!("🎯 FULL EVENT: {}", serde_json::to_string_pretty(event).unwrap_or_default());
-                        
-                        let mut conn = match self.get_connection().await {
-                            Ok(conn) => conn,
-                            Err(e) => {
-                                error!("Failed to get database connection: {}", e);
-                                continue;
-                            }
-                        };
-                        
-                        // Process using the same handler
-                        info!("🔄 Processing legacy unblock profile event");
-                        if let Err(e) = crate::events::blocking_events::process_profile_unblock_event(&mut conn, event).await {
-                            error!("❌ Failed to process legacy UnblockProfileEvent: {}", e);
-                        } else {
-                            info!("✅ Successfully processed legacy UnblockProfileEvent");
-                        }
-                    },
+                    // Note: UserBlockEvent is handled directly in blockchain/events.rs
+                    // Handle only things not covered in blockchain/events.rs
                     t if t.starts_with(MODULE_PREFIX_BLOCK_LIST) && t.ends_with("EntityBlockedEvent") => {
                         if let Ok(event) = parse_event::<EntityBlockedEvent>(event) {
                             if let Err(e) = self.process_entity_blocked(&event).await {

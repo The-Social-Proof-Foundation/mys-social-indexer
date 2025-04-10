@@ -128,9 +128,6 @@ table! {
         profile_id -> Varchar,
         blocked_by -> Varchar,
         created_at -> Timestamp,
-        is_blocked -> Bool,
-        unblocked_at -> Nullable<Timestamp>,
-        unblocked_by -> Nullable<Varchar>,
     }
 }
 
@@ -152,9 +149,7 @@ table! {
         id -> Integer,
         platform_id -> Varchar,
         profile_id -> Varchar,
-        role -> Varchar,
         joined_at -> Timestamp,
-        left_at -> Nullable<Timestamp>,
     }
 }
 
@@ -164,11 +159,9 @@ table! {
 table! {
     profiles_blocked (id) {
         id -> Integer,
-        blocker_profile_id -> Varchar,
-        blocked_profile_id -> Varchar,
+        blocker_wallet_address -> Varchar,
+        blocked_address -> Varchar,
         created_at -> Timestamp,
-        is_blocked -> Bool,
-        unblocked_at -> Nullable<Timestamp>,
     }
 }
 

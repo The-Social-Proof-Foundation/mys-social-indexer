@@ -11,29 +11,18 @@ use crate::schema::profiles_blocked;
 #[diesel(table_name = profiles_blocked)]
 pub struct ProfileBlock {
     pub id: i32,
-    pub blocker_profile_id: String,
-    pub blocked_profile_id: String,
+    pub blocker_wallet_address: String,
+    pub blocked_address: String,
     pub created_at: NaiveDateTime,
-    pub is_blocked: bool,
-    pub unblocked_at: Option<NaiveDateTime>,
 }
 
 /// DTO for inserting a new profile block
-#[derive(Debug, Insertable, Serialize, Deserialize)]
+#[derive(Debug, Insertable, AsChangeset, Serialize, Deserialize)]
 #[diesel(table_name = profiles_blocked)]
 pub struct NewProfileBlock {
-    pub blocker_profile_id: String,
-    pub blocked_profile_id: String,
+    pub blocker_wallet_address: String,
+    pub blocked_address: String,
     pub created_at: NaiveDateTime,
-    pub is_blocked: bool,
-}
-
-/// DTO for updating a profile block
-#[derive(Debug, AsChangeset, Serialize, Deserialize)]
-#[diesel(table_name = profiles_blocked)]
-pub struct UpdateProfileBlock {
-    pub is_blocked: Option<bool>,
-    pub unblocked_at: Option<NaiveDateTime>,
 }
 
 /// Events from block_list.move - renamed to match Move contracts

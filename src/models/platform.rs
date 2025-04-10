@@ -115,9 +115,6 @@ pub struct PlatformBlockedProfile {
     pub profile_id: String,
     pub blocked_by: String,
     pub created_at: NaiveDateTime,
-    pub is_blocked: bool,
-    pub unblocked_at: Option<NaiveDateTime>,
-    pub unblocked_by: Option<String>,
 }
 
 /// DTO for inserting a new platform blocked profile
@@ -128,16 +125,6 @@ pub struct NewPlatformBlockedProfile {
     pub profile_id: String,
     pub blocked_by: String,
     pub created_at: NaiveDateTime,
-    pub is_blocked: bool,
-}
-
-/// DTO for updating a platform blocked profile
-#[derive(Debug, AsChangeset, Serialize, Deserialize)]
-#[diesel(table_name = platform_blocked_profiles)]
-pub struct UpdatePlatformBlockedProfile {
-    pub is_blocked: Option<bool>,
-    pub unblocked_at: Option<NaiveDateTime>,
-    pub unblocked_by: Option<String>,
 }
 
 /// Platform event model
@@ -392,9 +379,7 @@ pub struct UserLeftPlatformEvent {
 pub struct NewPlatformMembership {
     pub platform_id: String,
     pub profile_id: String,
-    pub role: String,
     pub joined_at: NaiveDateTime,
-    pub left_at: Option<NaiveDateTime>,
 }
 
 // Note: PlatformRelationship, NewPlatformRelationship, and UpdatePlatformRelationship 

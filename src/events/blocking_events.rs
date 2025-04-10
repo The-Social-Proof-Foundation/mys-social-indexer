@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use chrono::Utc;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use serde_json;
@@ -10,13 +9,18 @@ use tracing::{info, error};
 use serde::{Deserialize, Serialize};
 
 use crate::db::DbConnection;
-use crate::models::blocking::{
-    PlatformBlockedProfileEvent, PlatformUnblockedProfileEvent,
-    UserBlockEvent, UserUnblockEvent
-};
 use crate::schema::profile_events;
+use crate::schema::profiles_blocked;
+use crate::models::blocking::profile_blocks::NewProfileBlock;
+use crate::models::blocking::profile_blocks::UserBlockEvent;
+use crate::models::blocking::profile_blocks::UserUnblockEvent;
 use crate::models::profile_events::NewProfileEvent;
 use crate::events::profile_event_types::{BlockAddedEvent, BlockRemovedEvent};
+
+// Import platform event types
+use crate::events::{
+    PlatformBlockedProfileEvent, PlatformUnblockedProfileEvent,
+};
 
 /// Event emitted when a BlockList is created
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,67 +42,66 @@ pub async fn process_profile_block_event(
         event_data
     );
     
-    // Try parsing different event formats
-    info!("Processing block event");
-    
-    // Parse the UserBlockEvent 
+    // Parse the UserBlockEvent
     let block_event = match serde_json::from_value::<UserBlockEvent>(event_data.clone()) {
         Ok(evt) => {
-            info!("Successfully parsed UserBlockEvent: blocker={}, blocked={}", 
-                evt.blocker, evt.blocked);
+            info!(
+                "Successfully parsed UserBlockEvent: blocker={}, blocked={}",
+                evt.blocker, evt.blocked
+            );
             evt
         },
         Err(e) => {
             info!("Failed to parse UserBlockEvent: {}", e);
             
-            // Extract directly from fields
+            // Extract directly from JSON
             let empty_map = serde_json::Map::new();
             let obj = event_data.as_object().unwrap_or(&empty_map);
             
-            // Try standard "fields" container
+            // Try to extract from fields container first
             if let Some(fields_obj) = obj.get("fields").and_then(|f| f.as_object()) {
-                if let (Some(blocker), Some(blocked)) = (
-                    fields_obj.get("blocker").and_then(|v| v.as_str()),
-                    fields_obj.get("blocked").and_then(|v| v.as_str())
-                ) {
-                    info!("Found fields in standard location: blocker={}, blocked={}", blocker, blocked);
-                    
-                    UserBlockEvent {
-                        blocker: blocker.to_string(),
-                        blocked: blocked.to_string(),
-                    }
-                } else {
-                    // Try direct object keys
-                    let blocker = obj.get("blocker").and_then(|v| v.as_str())
-                        .unwrap_or_default().to_string();
-                        
-                    let blocked = obj.get("blocked").and_then(|v| v.as_str())
-                        .unwrap_or_default().to_string();
-                    
-                    UserBlockEvent { 
-                        blocker, 
-                        blocked,
-                    }
-                }
-            } else {
-                // Try direct object keys
-                let blocker = obj.get("blocker").and_then(|v| v.as_str())
+                // Try to extract blocker and blocked
+                let blocker = fields_obj.get("blocker").and_then(|v| v.as_str())
                     .unwrap_or_default().to_string();
                     
-                let blocked = obj.get("blocked").and_then(|v| v.as_str())
+                let blocked = fields_obj.get("blocked").and_then(|v| v.as_str())
                     .unwrap_or_default().to_string();
                 
-                UserBlockEvent { 
-                    blocker, 
-                    blocked,
+                UserBlockEvent { blocker, blocked }
+            }
+            // Try module-level properties directly
+            else if obj.get("blocker").is_some() && obj.get("blocked").is_some() {
+                UserBlockEvent {
+                    blocker: obj.get("blocker").and_then(|v| v.as_str())
+                        .unwrap_or_default().to_string(),
+                    blocked: obj.get("blocked").and_then(|v| v.as_str())
+                        .unwrap_or_default().to_string(),
+                }
+            }
+            // Try event container (may be nested)
+            else if let Some(event_obj) = obj.get("event").and_then(|e| e.as_object()) {
+                UserBlockEvent {
+                    blocker: event_obj.get("blocker").and_then(|v| v.as_str())
+                        .unwrap_or_default().to_string(),
+                    blocked: event_obj.get("blocked").and_then(|v| v.as_str())
+                        .unwrap_or_default().to_string(),
+                }
+            }
+            // As a last resort, try to parse raw JSON
+            else {
+                // Create a placeholder event
+                UserBlockEvent {
+                    blocker: "unknown".to_string(),
+                    blocked: "unknown".to_string(),
                 }
             }
         }
     };
     
-    // Check if all required fields are present
-    if block_event.blocker.is_empty() || block_event.blocked.is_empty() {
-        info!("Missing required fields in block event, skipping");
+    // Check if we have valid data
+    if block_event.blocker.is_empty() || block_event.blocker == "unknown" ||
+       block_event.blocked.is_empty() || block_event.blocked == "unknown" {
+        info!("Invalid block event data, skipping");
         return Ok(());
     }
     
@@ -107,117 +110,59 @@ pub async fn process_profile_block_event(
         block_event.blocker, block_event.blocked
     );
     
-    // First check if there's already an entry for this block
-    use crate::schema::profiles_blocked::dsl::*;
+    // Create a profile block record
+    let now = chrono::Utc::now().naive_utc();
+    let profile_block = NewProfileBlock {
+        blocker_wallet_address: block_event.blocker.clone(),
+        blocked_address: block_event.blocked.clone(),
+        created_at: now,
+    };
     
-    let existing = profiles_blocked
-        .filter(blocker_profile_id.eq(&block_event.blocker))
-        .filter(blocked_profile_id.eq(&block_event.blocked))
-        .first::<crate::models::blocking::ProfileBlock>(conn)
-        .await
-        .optional()?;
+    // Insert the block record
+    let result = diesel::insert_into(profiles_blocked::table)
+        .values(&profile_block)
+        .on_conflict_do_nothing()
+        .execute(conn)
+        .await;
         
-    if let Some(_) = existing {
-        // Update the existing entry
-        diesel::update(profiles_blocked)
-            .filter(blocker_profile_id.eq(&block_event.blocker))
-            .filter(blocked_profile_id.eq(&block_event.blocked))
-            .set((
-                is_blocked.eq(true),
-                unblocked_at.eq::<Option<chrono::NaiveDateTime>>(None),
-            ))
-            .execute(conn)
-            .await?;
+    match result {
+        Ok(_) => {
+            info!("Successfully created/updated profile block record");
             
-        info!("Updated existing block record");
-    } else {
-        // Insert a new entry
-        info!("Attempting to insert new block record with blocker={}, blocked={}", 
-            block_event.blocker, block_event.blocked);
+            // Create a profile_events entry to track in user history
+            let block_timestamp = chrono::Utc::now().timestamp() as u64;
             
-        // Use profiles_blocked more explicitly to avoid confusion
-        use crate::schema::profiles_blocked;
-        
-        // Build the values to insert
-        let values = (
-            profiles_blocked::blocker_profile_id.eq(block_event.blocker.clone()),
-            profiles_blocked::blocked_profile_id.eq(block_event.blocked.clone()),
-            profiles_blocked::created_at.eq(Utc::now().naive_utc()),
-            profiles_blocked::is_blocked.eq(true),
-        );
-        
-        // Log the exact SQL values being inserted (for debugging)
-        info!("SQL Insert values: blocker_profile_id={}, blocked_profile_id={}, created_at=now(), is_blocked=true", 
-            block_event.blocker, block_event.blocked);
+            // Create block added event for profile_events
+            let profile_block_event = BlockAddedEvent {
+                blocker_profile_id: block_event.blocker.clone(),
+                blocked_profile_id: block_event.blocked.clone(),
+                timestamp: block_timestamp,
+            };
             
-        let result = diesel::insert_into(profiles_blocked::table)
-            .values(values)
-            .execute(conn)
-            .await;
+            // Create profile event for blocking
+            let profile_event = NewProfileEvent::from_block_added(
+                &profile_block_event,
+                None // No event ID available
+            );
             
-        match result {
-            Ok(rows) => {
-                info!("Successfully created {} new block record(s)", rows);
-            },
-            Err(e) => {
-                error!("Failed to insert block record: {}", e);
-                // Try to determine what went wrong
-                if e.to_string().contains("duplicate key") {
-                    info!("This appears to be a duplicate key error - record might already exist");
-                    
-                    // Try to update instead of insert
-                    let update_result = diesel::update(profiles_blocked)
-                        .filter(blocker_profile_id.eq(&block_event.blocker))
-                        .filter(blocked_profile_id.eq(&block_event.blocked))
-                        .set((
-                            is_blocked.eq(true),
-                            unblocked_at.eq::<Option<chrono::NaiveDateTime>>(None),
-                        ))
-                        .execute(conn)
-                        .await;
-                        
-                    match update_result {
-                        Ok(rows) => info!("Updated {} existing block records instead", rows),
-                        Err(update_err) => error!("Update fallback also failed: {}", update_err)
-                    }
-                } else if e.to_string().contains("violates foreign key") {
-                    error!("This appears to be a foreign key constraint violation. Check if the profiles exist in the database.");
-                } else {
-                    // Return the error
-                    return Err(anyhow::anyhow!("Database error: {}", e));
+            // Insert into profile_events
+            let event_result = diesel::insert_into(profile_events::table)
+                .values(&profile_event)
+                .execute(conn)
+                .await;
+                
+            match event_result {
+                Ok(_) => {
+                    info!("Successfully created profile_events record for block event");
+                },
+                Err(e) => {
+                    error!("Failed to insert block event into profile_events: {}", e);
                 }
             }
-        };
-        
-        // Create a profile_events entry to track in user history
-        let block_timestamp = chrono::Utc::now().timestamp() as u64;
-        
-        // Create block event for profile_events
-        let profile_block_event = BlockAddedEvent {
-            blocker_profile_id: block_event.blocker.clone(),
-            blocked_profile_id: block_event.blocked.clone(),
-            timestamp: block_timestamp,
-        };
-        
-        // Create profile event for blocking
-        let profile_event = NewProfileEvent::from_block_added(
-            &profile_block_event,
-            None // No event ID available
-        );
-        
-        // Insert into profile_events
-        let result = diesel::insert_into(profile_events::table)
-            .values(&profile_event)
-            .execute(conn)
-            .await;
-            
-        match result {
-            Ok(_) => {
-                info!("Successfully created profile_events record for block event");
-            },
-            Err(e) => {
-                error!("Failed to insert block event into profile_events: {}", e);
-            }
+        },
+        Err(e) => {
+            error!("Failed to insert profile block record: {}", e);
+            return Err(anyhow::anyhow!("Database error: {}", e));
         }
     }
     
@@ -285,26 +230,22 @@ pub async fn process_profile_unblock_event(
         unblock_event.blocker, unblock_event.unblocked
     );
     
-    // Update the block record to mark as unblocked
-    let result = diesel::update(crate::schema::profiles_blocked::table)
+    // Delete the block record instead of updating it
+    let result = diesel::delete(crate::schema::profiles_blocked::table)
         .filter(
-            crate::schema::profiles_blocked::blocker_profile_id.eq(unblock_event.blocker.clone())
+            crate::schema::profiles_blocked::blocker_wallet_address.eq(unblock_event.blocker.clone())
         )
         .filter(
-            crate::schema::profiles_blocked::blocked_profile_id.eq(unblock_event.unblocked.clone())
+            crate::schema::profiles_blocked::blocked_address.eq(unblock_event.unblocked.clone())
         )
-        .set((
-            crate::schema::profiles_blocked::is_blocked.eq(false),
-            crate::schema::profiles_blocked::unblocked_at.eq(Utc::now().naive_utc()),
-        ))
         .execute(conn)
         .await;
         
     match result {
         Ok(rows) => {
-            info!("Updated {} block records to unblocked status", rows);
+            info!("Deleted {} profile block records", rows);
             if rows == 0 {
-                info!("Note: No rows were updated - the block record may not exist");
+                info!("Note: No rows were deleted - the block record may not exist");
             }
             
             // Create a profile_events entry to track in user history
@@ -339,7 +280,7 @@ pub async fn process_profile_unblock_event(
             }
         },
         Err(e) => {
-            error!("Failed to update profiles_blocked table: {}", e);
+            error!("Failed to delete records from profiles_blocked table: {}", e);
             return Err(anyhow::anyhow!("Database error: {}", e));
         }
     }

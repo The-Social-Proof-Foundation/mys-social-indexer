@@ -471,7 +471,7 @@ impl ProfileEventListener {
                                         diesel::dsl::sql::<diesel::sql_types::Bool>(
                                             "EXISTS (SELECT 1 FROM information_schema.columns 
                                              WHERE table_name = 'profiles_blocked' 
-                                             AND column_name = 'blocker_profile_id')"
+                                             AND column_name = 'blocker_wallet_address')"
                                         )
                                     )
                                     .get_result::<bool>(&mut conn)
@@ -482,7 +482,7 @@ impl ProfileEventListener {
                                             if has_cols {
                                                 info!("✅ Required columns exist in profiles_blocked table");
                                             } else {
-                                                error!("❌ Required column 'blocker_profile_id' not found in profiles_blocked table");
+                                                error!("❌ Required column 'blocker_wallet_address' not found in profiles_blocked table");
                                             }
                                         },
                                         Err(e) => error!("Failed to check for required columns: {}", e),
@@ -562,8 +562,8 @@ impl ProfileEventListener {
                         
                         if !blocker_value.is_empty() && !blocked_value.is_empty() {
                             let query = profiles_blocked
-                                .filter(blocker_profile_id.eq(blocker_value))
-                                .filter(blocked_profile_id.eq(blocked_value))
+                                .filter(blocker_wallet_address.eq(blocker_value))
+                                .filter(blocked_address.eq(blocked_value))
                                 .select(id);
                                 
                             info!("Executing verification query for blocker={}, blocked={}", 

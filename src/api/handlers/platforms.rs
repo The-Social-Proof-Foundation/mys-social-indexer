@@ -91,7 +91,6 @@ pub async fn get_platforms(
                 // Get blocked profiles count
                 let blocked_count = platform_blocked_profiles::table
                     .filter(platform_blocked_profiles::platform_id.eq(&platform.platform_id))
-                    .filter(platform_blocked_profiles::is_blocked.eq(true))
                     .count()
                     .get_result::<i64>(&mut conn)
                     .await
@@ -196,7 +195,6 @@ pub async fn get_platform_by_id(
             // Get blocked profiles count
             let blocked_count = platform_blocked_profiles::table
                 .filter(platform_blocked_profiles::platform_id.eq(&platform.platform_id))
-                .filter(platform_blocked_profiles::is_blocked.eq(true))
                 .count()
                 .get_result::<i64>(&mut conn)
                 .await
@@ -446,7 +444,6 @@ pub async fn get_approved_platforms(
                 // Get blocked profiles count
                 let blocked_count = platform_blocked_profiles::table
                     .filter(platform_blocked_profiles::platform_id.eq(&platform.platform_id))
-                    .filter(platform_blocked_profiles::is_blocked.eq(true))
                     .count()
                     .get_result::<i64>(&mut conn)
                     .await
@@ -633,29 +630,25 @@ pub async fn get_platform_blocked_profiles(
     }
     
     // Get the total count for pagination info
-    let total_count = match platform_blocked_profiles::table
+    let total_count = platform_blocked_profiles::table
         .filter(platform_blocked_profiles::platform_id.eq(&platform_id))
-        .filter(platform_blocked_profiles::is_blocked.eq(true))
         .count()
         .get_result::<i64>(&mut conn)
-        .await {
-        Ok(count) => count,
-        Err(_) => 0,
-    };
+        .await
+        .unwrap_or(0);
     
     let total_pages = (total_count as f64 / limit as f64).ceil() as i64;
     
     // Get blocked profiles with pagination
-    let blocked_result = platform_blocked_profiles::table
+    let blocked_profiles_result = platform_blocked_profiles::table
         .filter(platform_blocked_profiles::platform_id.eq(&platform_id))
-        .filter(platform_blocked_profiles::is_blocked.eq(true))
         .order_by(platform_blocked_profiles::created_at.desc())
         .limit(limit)
         .offset(offset)
         .load::<PlatformBlockedProfile>(&mut conn)
         .await;
     
-    match blocked_result {
+    match blocked_profiles_result {
         Ok(blocked) => {
             (StatusCode::OK, Json(serde_json::json!({
                 "blocked_profiles": blocked,

@@ -7,7 +7,6 @@ use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
-use chrono::NaiveDateTime;
 // Serde json utilities
 
 use crate::db::{Database, DbConnection};
@@ -605,54 +604,45 @@ impl PlatformEventHandler {
                     .await;
                 
                 match existing_relationship {
-                    Ok(relationship) => {
-                        // Update existing relationship to blocked status
-                        diesel::update(schema::platform_blocked_profiles::table)
-                            .filter(schema::platform_blocked_profiles::id.eq(relationship.id))
-                            .set((
-                                schema::platform_blocked_profiles::is_blocked.eq(true),
-                                schema::platform_blocked_profiles::blocked_by.eq(&event.blocked_by),
-                                schema::platform_blocked_profiles::created_at.eq(
-                                    chrono::DateTime::from_timestamp(now.as_secs() as i64, 0)
-                                        .unwrap_or_else(|| chrono::Utc::now())
-                                        .naive_utc()
-                                ),
-                                schema::platform_blocked_profiles::unblocked_at.eq::<Option<NaiveDateTime>>(None),
-                                schema::platform_blocked_profiles::unblocked_by.eq::<Option<String>>(None)
-                            ))
+                    Ok(_) => {
+                        // Delete the existing record - we'll insert a new one to reset the timestamps
+                        diesel::delete(schema::platform_blocked_profiles::table)
+                            .filter(schema::platform_blocked_profiles::platform_id.eq(&event.platform_id))
+                            .filter(schema::platform_blocked_profiles::profile_id.eq(&event.profile_id))
                             .execute(&mut conn)
                             .await?;
                         
-                        info!("Updated profile {} block status for platform {}", event.profile_id, event.platform_id);
+                        info!("Deleted existing block relationship to refresh timestamp");
+                        
+                        // Create new blocked profile relationship below
                     },
                     Err(diesel::result::Error::NotFound) => {
-                        // Create new blocked profile relationship
-                        let new_blocked_profile = (
-                            schema::platform_blocked_profiles::platform_id.eq(event.platform_id.clone()),
-                            schema::platform_blocked_profiles::profile_id.eq(event.profile_id.clone()),
-                            schema::platform_blocked_profiles::blocked_by.eq(event.blocked_by.clone()),
-                            schema::platform_blocked_profiles::created_at.eq(
-                                chrono::DateTime::from_timestamp(now.as_secs() as i64, 0)
-                                    .unwrap_or_else(|| chrono::Utc::now())
-                                    .naive_utc()
-                            ),
-                            schema::platform_blocked_profiles::is_blocked.eq(true),
-                            schema::platform_blocked_profiles::unblocked_at.eq::<Option<NaiveDateTime>>(None),
-                            schema::platform_blocked_profiles::unblocked_by.eq::<Option<String>>(None)
-                        );
-                        
-                        diesel::insert_into(schema::platform_blocked_profiles::table)
-                            .values(new_blocked_profile)
-                            .execute(&mut conn)
-                            .await?;
-                        
-                        info!("Created new blocked profile relationship: {} on platform {}", event.profile_id, event.platform_id);
+                        // No existing relationship - we'll create a new one
                     },
                     Err(e) => {
                         error!("Error checking for existing block relationship: {}", e);
                         return Err(e);
                     }
                 }
+                
+                // Create new blocked profile relationship
+                let new_blocked_profile = (
+                    schema::platform_blocked_profiles::platform_id.eq(event.platform_id.clone()),
+                    schema::platform_blocked_profiles::profile_id.eq(event.profile_id.clone()),
+                    schema::platform_blocked_profiles::blocked_by.eq(event.blocked_by.clone()),
+                    schema::platform_blocked_profiles::created_at.eq(
+                        chrono::DateTime::from_timestamp(now.as_secs() as i64, 0)
+                            .unwrap_or_else(|| chrono::Utc::now())
+                            .naive_utc()
+                    )
+                );
+                
+                diesel::insert_into(schema::platform_blocked_profiles::table)
+                    .values(new_blocked_profile)
+                    .execute(&mut conn)
+                    .await?;
+                
+                info!("Created new blocked profile relationship: {} on platform {}", event.profile_id, event.platform_id);
                 
                 Result::<_, diesel::result::Error>::Ok(())
             }))
@@ -697,76 +687,17 @@ impl PlatformEventHandler {
                     .execute(&mut conn)
                     .await?;
                 
-                // Check if this platform-profile relationship exists
-                let existing_relationship = schema::platform_blocked_profiles::table
+                // Delete the block relationship entirely instead of updating it
+                let deleted_count = diesel::delete(schema::platform_blocked_profiles::table)
                     .filter(schema::platform_blocked_profiles::platform_id.eq(&event.platform_id))
                     .filter(schema::platform_blocked_profiles::profile_id.eq(&event.profile_id))
-                    .first::<PlatformBlockedProfile>(&mut conn)
-                    .await;
+                    .execute(&mut conn)
+                    .await?;
                 
-                match existing_relationship {
-                    Ok(relationship) => {
-                        // Update existing relationship to unblocked status
-                        let current_timestamp = chrono::DateTime::from_timestamp(now.as_secs() as i64, 0)
-                            .unwrap_or_else(|| chrono::Utc::now())
-                            .naive_utc();
-                            
-                        diesel::update(schema::platform_blocked_profiles::table)
-                            .filter(schema::platform_blocked_profiles::id.eq(relationship.id))
-                            .set((
-                                schema::platform_blocked_profiles::is_blocked.eq(false),
-                                schema::platform_blocked_profiles::unblocked_at.eq(current_timestamp),
-                                schema::platform_blocked_profiles::unblocked_by.eq(&event.unblocked_by)
-                            ))
-                            .execute(&mut conn)
-                            .await?;
-                        
-                        info!("Updated profile {} to unblocked status for platform {}", event.profile_id, event.platform_id);
-                    },
-                    Err(diesel::result::Error::NotFound) => {
-                        // No existing relationship, this is unusual
-                        warn!("Unblock event for non-existent block relationship: {} on platform {}", event.profile_id, event.platform_id);
-                        
-                        // Create a historical record of this unblock with is_blocked=false
-                        let created_timestamp = chrono::DateTime::from_timestamp(now.as_secs() as i64, 0)
-                            .unwrap_or_else(|| chrono::Utc::now())
-                            .naive_utc();
-                            
-                        let new_blocked_profile = (
-                            schema::platform_blocked_profiles::platform_id.eq(event.platform_id.clone()),
-                            schema::platform_blocked_profiles::profile_id.eq(event.profile_id.clone()),
-                            schema::platform_blocked_profiles::blocked_by.eq("unknown".to_string()),
-                            schema::platform_blocked_profiles::created_at.eq(created_timestamp),
-                            schema::platform_blocked_profiles::is_blocked.eq(false) // Already unblocked
-                        );
-                        
-                        // Insert record
-                        let inserted_id = diesel::insert_into(schema::platform_blocked_profiles::table)
-                            .values(new_blocked_profile)
-                            .returning(schema::platform_blocked_profiles::id)
-                            .get_result::<i32>(&mut conn)
-                            .await?;
-                        
-                        // Update with unblock information
-                        diesel::update(schema::platform_blocked_profiles::table)
-                            .filter(schema::platform_blocked_profiles::id.eq(inserted_id))
-                            .set((
-                                schema::platform_blocked_profiles::unblocked_at.eq(
-                                    chrono::DateTime::from_timestamp(now.as_secs() as i64, 0)
-                                        .unwrap_or_else(|| chrono::Utc::now())
-                                        .naive_utc()
-                                ),
-                                schema::platform_blocked_profiles::unblocked_by.eq(&event.unblocked_by)
-                            ))
-                            .execute(&mut conn)
-                            .await?;
-                        
-                        info!("Created unblock record for previously unknown block: {} on platform {}", event.profile_id, event.platform_id);
-                    },
-                    Err(e) => {
-                        error!("Error checking for existing block relationship: {}", e);
-                        return Err(e);
-                    }
+                if deleted_count > 0 {
+                    info!("Deleted block relationship: {} on platform {}", event.profile_id, event.platform_id);
+                } else {
+                    warn!("No block relationship found to delete: {} on platform {}", event.profile_id, event.platform_id);
                 }
                 
                 Result::<_, diesel::result::Error>::Ok(())
@@ -917,7 +848,6 @@ impl PlatformEventHandler {
                 let profile_is_blocked = schema::platform_blocked_profiles::table
                     .filter(schema::platform_blocked_profiles::platform_id.eq(&event.platform_id))
                     .filter(schema::platform_blocked_profiles::profile_id.eq(&event.profile_id))
-                    .filter(schema::platform_blocked_profiles::is_blocked.eq(true))
                     .count()
                     .get_result::<i64>(&mut conn)
                     .await
@@ -932,7 +862,6 @@ impl PlatformEventHandler {
                 let membership_exists = schema::platform_memberships::table
                     .filter(schema::platform_memberships::platform_id.eq(&event.platform_id))
                     .filter(schema::platform_memberships::profile_id.eq(&event.profile_id))
-                    .filter(schema::platform_memberships::left_at.is_null())
                     .count()
                     .get_result::<i64>(&mut conn)
                     .await
@@ -943,11 +872,9 @@ impl PlatformEventHandler {
                     let new_membership = NewPlatformMembership {
                         platform_id: event.platform_id.clone(),
                         profile_id: event.profile_id.clone(),
-                        role: "member".to_string(), // Default role for new members
                         joined_at: chrono::DateTime::from_timestamp(event.timestamp as i64, 0)
                             .unwrap_or_else(|| chrono::Utc::now())
                             .naive_utc(),
-                        left_at: None,
                     };
                     
                     // Insert membership
@@ -1029,27 +956,20 @@ impl PlatformEventHandler {
                 let membership_exists = schema::platform_memberships::table
                     .filter(schema::platform_memberships::platform_id.eq(&event.platform_id))
                     .filter(schema::platform_memberships::profile_id.eq(&event.profile_id))
-                    .filter(schema::platform_memberships::left_at.is_null())
                     .count()
                     .get_result::<i64>(&mut conn)
                     .await
                     .unwrap_or(0) > 0;
                 
                 if membership_exists {
-                    // Update membership with left_at timestamp
-                    diesel::update(schema::platform_memberships::table)
+                    // Delete the membership record
+                    diesel::delete(schema::platform_memberships::table)
                         .filter(schema::platform_memberships::platform_id.eq(&event.platform_id))
                         .filter(schema::platform_memberships::profile_id.eq(&event.profile_id))
-                        .filter(schema::platform_memberships::left_at.is_null())
-                        .set(schema::platform_memberships::left_at.eq(Some(
-                            chrono::DateTime::from_timestamp(event.timestamp as i64, 0)
-                                .unwrap_or_else(|| chrono::Utc::now())
-                                .naive_utc()
-                        )))
                         .execute(&mut conn)
                         .await?;
                     
-                    info!("Updated platform membership: {} -> {}", event.profile_id, event.platform_id);
+                    info!("Deleted platform membership for user leaving: {} -> {}", event.profile_id, event.platform_id);
                     
                     // Also create a profile event for this action to track in profile history
                     let platform_left_event = crate::events::profile_event_types::PlatformLeftEvent {

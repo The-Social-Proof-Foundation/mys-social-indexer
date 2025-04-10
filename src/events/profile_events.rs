@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize, Deserializer};
 use std::str::FromStr;
 
@@ -112,10 +112,9 @@ pub struct ProfileCreatedEvent {
 impl ProfileCreatedEvent {
     /// Convert the event to a database model
     pub fn into_model(&self) -> Result<NewProfile> {
-        // Convert timestamp to datetime format for database
-        let created_at = DateTime::from_timestamp(self.created_at as i64, 0)
-            .unwrap_or(Utc::now())
-            .naive_utc();
+        // Always use the current time for database entries instead of blockchain epoch
+        // Blockchain epoch values are small numbers (like 21) and not actual Unix timestamps
+        let now = Utc::now().naive_utc();
         
         // Use username if available, otherwise generate a placeholder
         let username = match &self.username {
@@ -131,6 +130,7 @@ impl ProfileCreatedEvent {
         tracing::info!("  bio: {:?}", self.bio);
         tracing::info!("  profile_photo: {:?}", self.profile_photo);
         tracing::info!("  cover_photo: {:?}", self.cover_photo);
+        tracing::info!("  using current timestamp instead of blockchain epoch");
         
         // Always use the profile photo if it exists
         let profile_photo = self.profile_photo.clone();
@@ -145,8 +145,8 @@ impl ProfileCreatedEvent {
             bio: self.bio.clone(),
             profile_photo,
             website: None,     // Not provided in profile creation event
-            created_at,
-            updated_at: created_at,
+            created_at: now,   // Use current time for created_at
+            updated_at: now,   // Use current time for updated_at
             cover_photo,
             profile_id: Some(self.profile_id.clone()),
             sensitive_data_updated_at: None, // Will be set when sensitive data is added

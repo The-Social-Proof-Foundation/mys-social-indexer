@@ -16,7 +16,7 @@ pub use social_graph::*;
 pub use platform::{
     Platform, NewPlatform, UpdatePlatform,
     PlatformModerator, NewPlatformModerator,
-    PlatformBlockedProfile, NewPlatformBlockedProfile, UpdatePlatformBlockedProfile,
+    PlatformBlockedProfile, NewPlatformBlockedProfile,
     PlatformEvent, NewPlatformEvent,
     PlatformWithDetails, PlatformCreatedEvent, PlatformApprovalChangedEvent,
     PlatformUpdatedEvent, PlatformStatus, ModeratorAddedEvent, ModeratorRemovedEvent,
